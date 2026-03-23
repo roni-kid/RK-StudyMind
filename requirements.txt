@@ -1,0 +1,6 @@
+gradio
+anthropic
+chromadb
+PyMuPDF
+sentence-transformers
+requests

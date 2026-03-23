@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual Environment — don't upload this (too large)
+venv/
+env/
+.venv/
+
+# ChromaDB data — personal, don't share
+data/
+
+# Uploaded PDFs — personal files
+uploads/
+
+# LM Studio / model files
+*.gguf
+*.bin
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE settings
+.vscode/
+.idea/
+
+# Logs
+*.log
