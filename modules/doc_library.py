@@ -73,7 +73,7 @@ def render_library_html() -> str:
         <div style="display:flex;justify-content:center;align-items:center;min-height:120px;
                     border:2px dashed #334155;border-radius:16px;color:#64748b;
                     font-family:'Segoe UI',sans-serif;font-size:15px;">
-          No documents yet — upload PDFs in the 📄 PDF Reader tab
+          No documents yet — upload PDFs or DOCX in the 📚 Library tab
         </div>"""
 
     cards_html = ""

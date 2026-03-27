@@ -10,7 +10,6 @@ from modules.vector_store import index_chunks, search_similar_chunks
 from modules.flashcards import generate_flashcards
 from modules.mindmap import generate_mindmap_markdown, mindmap_to_html
 from modules.quiz import generate_quiz
-from modules.summary import generate_quick_summary, generate_detailed_summary
 from modules.doc_library import (
     library, active_doc,
     add_document, set_active, remove_document,
@@ -78,7 +77,7 @@ def check_status():
 # -----------------------------------------------
 def load_files(files):
     if files is None:
-        return "⚠️ No files uploaded.", "", render_library_html(), get_doc_status(), get_filenames_for_dropdown(), get_checkbox_update(), get_checkbox_update()
+        return "⚠️ No files uploaded.", "", render_library_html(), get_doc_status(), get_filenames_for_dropdown(), get_checkbox_update(), get_checkbox_update(), get_checkbox_update()
 
     if not isinstance(files, list):
         files = [files]
@@ -107,7 +106,7 @@ def load_files(files):
         preview = text[:2000] + "\n\n... [truncated]" if len(text) > 2000 else text
 
     return (info, preview, render_library_html(), get_doc_status(),
-            get_filenames_for_dropdown(), get_checkbox_update(), get_checkbox_update())
+            get_filenames_for_dropdown(), get_checkbox_update(), get_checkbox_update(), get_checkbox_update())  # fc, quiz, mm selectors
 
 def switch_active_doc(filename):
     if not filename:
@@ -116,13 +115,23 @@ def switch_active_doc(filename):
     return render_library_html(), get_doc_status()
 
 def delete_doc(filename):
+    fns = get_all_filenames()
     if not filename:
-        return render_library_html(), get_doc_status(), get_filenames_for_dropdown(), get_checkbox_update(), get_checkbox_update()
+        return (render_library_html(), get_doc_status(),
+                gr.update(choices=fns, value=fns[0] if fns else None),
+                gr.update(choices=fns, value=None),
+                get_checkbox_update(), get_checkbox_update(), get_checkbox_update())
     remove_document(filename)
-    return render_library_html(), get_doc_status(), get_filenames_for_dropdown(), get_checkbox_update(), get_checkbox_update()
+    fns = get_all_filenames()  # refresh after removal
+    new_val = fns[0] if fns else None
+    return (render_library_html(), get_doc_status(),
+            gr.update(choices=fns, value=new_val),   # switch_dropdown
+            gr.update(choices=fns, value=None),       # delete_dropdown — cleared
+            get_checkbox_update(), get_checkbox_update(), get_checkbox_update())  # fc, quiz, mm
 
 def refresh_library():
-    return render_library_html(), get_doc_status(), get_filenames_for_dropdown(), get_checkbox_update(), get_checkbox_update()
+    return (render_library_html(), get_doc_status(), get_filenames_for_dropdown(),
+            get_checkbox_update(), get_checkbox_update(), get_checkbox_update())  # fc, quiz, mm
 
 # -----------------------------------------------
 # TAB 3: Q&A
@@ -278,19 +287,24 @@ def quiz_done_mode():
         gr.update(interactive=True,  variant="primary"),
     )
 
-def start_quiz(num_q):
+def start_quiz(num_q, selected_docs):
     global current_quiz
-    if not get_active_filename():
-        return ("⚠️ No document loaded.", render_quiz_empty(),
-                0, None, False, 0, get_doc_status(), *quiz_question_mode())  # ← fixed: *unpack
-    questions = generate_quiz(text=get_active_text(), num_questions=int(num_q))
+    if not selected_docs:
+        return ("⚠️ No documents selected. Tick at least one document.", render_quiz_empty(),
+                0, None, False, 0, *quiz_question_mode())
+    text = get_text_from_selection(selected_docs)
+    if not text.strip():
+        return ("⚠️ Selected documents have no text.", render_quiz_empty(),
+                0, None, False, 0, *quiz_question_mode())
+    questions = generate_quiz(text=text, num_questions=int(num_q))
     if not questions:
-        return ("⚠️ Could not generate quiz. Try a different document.", render_quiz_empty(),
-                0, None, False, 0, get_doc_status(), *quiz_question_mode())  # ← fixed: *unpack
+        return ("⚠️ Could not generate quiz. Try a different document or model.", render_quiz_empty(),
+                0, None, False, 0, *quiz_question_mode())
     current_quiz = questions
-    return (f"✅ {len(questions)} questions generated!",
+    source = f"{len(selected_docs)} doc(s)" if len(selected_docs) > 1 else selected_docs[0]
+    return (f"✅ {len(questions)} questions from: {source}",
             render_quiz_question(questions[0], 0, len(questions)),
-            0, None, False, 0, get_doc_status(), *quiz_question_mode())  # ← fixed: *unpack
+            0, None, False, 0, *quiz_question_mode())
 
 def quiz_select_answer(q_index, selected_letter, revealed, score):
     global current_quiz
@@ -329,28 +343,7 @@ def quiz_restart():
             0, None, False, 0, *quiz_question_mode())
 
 # -----------------------------------------------
-# TAB 5: Summary (with doc selector)
-# -----------------------------------------------
-def do_quick_summary(selected_docs):
-    if not selected_docs:
-        return "⚠️ No documents selected.", ""
-    text = get_text_from_selection(selected_docs)
-    if not text.strip():
-        return "⚠️ Selected documents have no text.", ""
-    source = ", ".join(selected_docs)
-    return f"✅ Quick summary from: {source}", generate_quick_summary(text)
-
-def do_detailed_summary(selected_docs):
-    if not selected_docs:
-        return "⚠️ No documents selected.", ""
-    text = get_text_from_selection(selected_docs)
-    if not text.strip():
-        return "⚠️ Selected documents have no text.", ""
-    source = ", ".join(selected_docs)
-    return f"✅ Detailed summary from: {source}", generate_detailed_summary(text)
-
-# -----------------------------------------------
-# TAB 6: Flashcards (with doc selector, up to 40)
+# TAB 5: Flashcards (with doc selector, up to 40)
 # -----------------------------------------------
 CARD_COLORS = ["#4F46E5", "#0891B2", "#059669", "#D97706", "#DC2626", "#7C3AED"]
 
@@ -497,22 +490,23 @@ def study_again():
 # -----------------------------------------------
 # Mindmap helpers
 # -----------------------------------------------
-def make_mindmap_full(topic, mm_scope):
-    if not get_active_filename():
-        return "⚠️ No document loaded.", None, get_doc_status(), ""
-    if mm_scope == "🌐 All Documents" and len(library) > 1:
-        text = get_combined_text()
-        title = f"All Documents ({len(library)} docs)"
+def make_mindmap_full(topic, selected_docs):
+    if not selected_docs:
+        return "⚠️ No documents selected. Tick at least one document.", None, ""
+    text = get_text_from_selection(selected_docs)
+    if not text.strip():
+        return "⚠️ Selected documents have no text.", None, ""
+    if len(selected_docs) > 1:
+        title = f"All Selected ({len(selected_docs)} docs)"
     else:
-        text = get_active_text()
-        title = topic.strip() if topic.strip() else get_active_filename().rsplit(".", 1)[0]
+        title = topic.strip() if topic.strip() else selected_docs[0].rsplit(".", 1)[0]
     md = generate_mindmap_markdown(text=text, topic=topic)
     html = mindmap_to_html(md, title=title)
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html", prefix="rk_mindmap_",
         dir=os.path.join(os.path.dirname(__file__), "data"))
     tmp.write(html.encode("utf-8"))
     tmp.close()
-    return "✅ Mindmap ready! Click 'Open Mindmap in Browser'.", tmp.name, get_doc_status(), md
+    return "✅ Mindmap ready! Click 'Open Mindmap in Browser'.", tmp.name, md
 
 def open_in_browser(file_path):
     if not file_path or not os.path.exists(file_path):
@@ -571,18 +565,9 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
                 delete_btn = gr.Button("🗑️ Remove", variant="secondary", scale=1)
             refresh_btn = gr.Button("🔄 Refresh", variant="secondary")
 
-            # Shared checkbox groups — updated when library changes
-            fc_doc_selector  = gr.CheckboxGroup(label="📄 Select Documents", choices=[], value=[], visible=False)
-            sum_doc_selector = gr.CheckboxGroup(label="📄 Select Documents", choices=[], value=[], visible=False)
-
-            upload_btn.click(fn=load_files, inputs=[file_input],
-                outputs=[info_output, preview_output, library_html, lib_doc_status,
-                         switch_dropdown, fc_doc_selector, sum_doc_selector])
+            # Note: upload/delete/refresh click handlers are wired after all tabs
+            # so they can reference selectors defined in later tabs.
             switch_btn.click(fn=switch_active_doc, inputs=[switch_dropdown], outputs=[library_html, lib_doc_status])
-            delete_btn.click(fn=delete_doc, inputs=[delete_dropdown],
-                outputs=[library_html, lib_doc_status, switch_dropdown, fc_doc_selector, sum_doc_selector])
-            refresh_btn.click(fn=refresh_library, inputs=[],
-                outputs=[library_html, lib_doc_status, switch_dropdown, fc_doc_selector, sum_doc_selector])
 
         # ---- TAB 3: Q&A ----
         with gr.Tab("💬 Q&A"):
@@ -605,8 +590,13 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
         # ---- TAB 4: Quiz ----
         with gr.Tab("📝 Quiz"):
             gr.Markdown("### Smart Quiz — Multiple Choice")
-            gr.Markdown("_Uses the active document. Switch docs in the Library tab._")
-            quiz_doc_status = gr.Textbox(label="📁 Active Document", value=get_doc_status(), interactive=False, lines=1)
+            gr.Markdown("_Select documents, set number of questions, then generate_")
+            quiz_doc_selector = gr.CheckboxGroup(
+                label="📄 Select Documents for Quiz",
+                choices=get_all_filenames(),
+                value=get_all_filenames(),
+                interactive=True
+            )
             with gr.Row():
                 num_q_slider   = gr.Slider(minimum=3, maximum=10, value=5, step=1, label="Number of questions")
                 start_quiz_btn = gr.Button("Generate Quiz 📝", variant="primary")
@@ -629,9 +619,9 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
             quiz_btn_outputs = [btn_a, btn_b, btn_c, btn_d, submit_btn, next_btn, restart_btn]
             quiz_outputs = [quiz_html, q_index_state, selected_state, revealed_state, score_state] + quiz_btn_outputs
 
-            start_quiz_btn.click(fn=start_quiz, inputs=[num_q_slider],
+            start_quiz_btn.click(fn=start_quiz, inputs=[num_q_slider, quiz_doc_selector],
                 outputs=[quiz_status, quiz_html, q_index_state, selected_state,
-                         revealed_state, score_state, quiz_doc_status] + quiz_btn_outputs)
+                         revealed_state, score_state] + quiz_btn_outputs)
             btn_a.click(fn=lambda qi, sl, rv, sc: quiz_select_answer(qi, "A", rv, sc),
                 inputs=[q_index_state, selected_state, revealed_state, score_state], outputs=quiz_outputs)
             btn_b.click(fn=lambda qi, sl, rv, sc: quiz_select_answer(qi, "B", rv, sc),
@@ -644,27 +634,7 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
             next_btn.click(fn=quiz_next, inputs=[q_index_state, selected_state, revealed_state, score_state], outputs=quiz_outputs)
             restart_btn.click(fn=quiz_restart, inputs=[], outputs=quiz_outputs)
 
-        # ---- TAB 5: Summary ----
-        with gr.Tab("✍️ Summary"):
-            gr.Markdown("### Auto Summary — Quick Revision")
-            gr.Markdown("_Select which documents to summarize_")
-            # Linked to the shared fc_doc_selector from Library tab
-            sum_selector = gr.CheckboxGroup(
-                label="📄 Select Documents to Summarize",
-                choices=get_all_filenames(),
-                value=get_all_filenames(),
-                interactive=True
-            )
-            sum_status = gr.Textbox(label="Status", interactive=False, lines=1)
-            with gr.Row():
-                quick_btn    = gr.Button("⚡ Quick Summary (5 bullets)", variant="primary", scale=1)
-                detailed_btn = gr.Button("📋 Detailed Summary", variant="secondary", scale=1)
-            summary_output = gr.Textbox(label="Summary", lines=20, interactive=False,
-                                        placeholder="Your summary will appear here...")
-            quick_btn.click(fn=do_quick_summary, inputs=[sum_selector], outputs=[sum_status, summary_output])
-            detailed_btn.click(fn=do_detailed_summary, inputs=[sum_selector], outputs=[sum_status, summary_output])
-
-        # ---- TAB 6: Flashcards ----
+        # ---- TAB 5: Flashcards ----
         with gr.Tab("🃏 Flashcards"):
             gr.Markdown("### Study Flashcards — One Card at a Time")
             gr.Markdown("_Select documents, set number of cards, then generate_")
@@ -704,11 +674,15 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
         # ---- TAB 7: Mindmap ----
         with gr.Tab("🗺️ Mindmap"):
             gr.Markdown("### Generate an Interactive Mindmap")
-            mm_doc_status = gr.Textbox(label="📁 Active Document", value=get_doc_status(), interactive=False, lines=1)
+            gr.Markdown("_Select documents, add an optional topic, then generate_")
+            mm_doc_selector = gr.CheckboxGroup(
+                label="📄 Select Documents for Mindmap",
+                choices=get_all_filenames(),
+                value=get_all_filenames(),
+                interactive=True
+            )
             with gr.Row():
-                topic_input = gr.Textbox(label="Topic (optional)", placeholder="Leave blank to auto-detect", lines=1, scale=2)
-                mm_scope = gr.Radio(choices=["🔍 Active Document Only", "🌐 All Documents"],
-                                    value="🔍 Active Document Only", label="Generate From", scale=1)
+                topic_input = gr.Textbox(label="Topic (optional)", placeholder="Leave blank to auto-detect", lines=1, scale=3)
                 mm_generate_btn = gr.Button("Generate Mindmap 🗺️", variant="primary", scale=0)
             mm_status = gr.Textbox(label="Status", interactive=False, lines=1)
             mm_file_path = gr.State(value=None)
@@ -717,9 +691,22 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
             gr.Markdown("---")
             mm_markdown_display = gr.Textbox(label="Mindmap Outline", lines=15, interactive=False,
                                              placeholder="Mindmap outline will appear here...")
-            mm_generate_btn.click(fn=make_mindmap_full, inputs=[topic_input, mm_scope],
-                outputs=[mm_status, mm_file_path, mm_doc_status, mm_markdown_display])
+            mm_generate_btn.click(fn=make_mindmap_full, inputs=[topic_input, mm_doc_selector],
+                outputs=[mm_status, mm_file_path, mm_markdown_display])
             mm_open_btn.click(fn=open_in_browser, inputs=[mm_file_path], outputs=[mm_open_status])
+
+    # -----------------------------------------------
+    # Wire library buttons to keep all tab selectors in sync
+    # (must be after all tabs so components are defined)
+    # -----------------------------------------------
+    upload_btn.click(fn=load_files, inputs=[file_input],
+        outputs=[info_output, preview_output, library_html, lib_doc_status,
+                 switch_dropdown, fc_selector, quiz_doc_selector, mm_doc_selector])
+    delete_btn.click(fn=delete_doc, inputs=[delete_dropdown],
+        outputs=[library_html, lib_doc_status, switch_dropdown, delete_dropdown,
+                 fc_selector, quiz_doc_selector, mm_doc_selector])
+    refresh_btn.click(fn=refresh_library, inputs=[],
+        outputs=[library_html, lib_doc_status, switch_dropdown, fc_selector, quiz_doc_selector, mm_doc_selector])
 
 if __name__ == "__main__":
     demo.launch(

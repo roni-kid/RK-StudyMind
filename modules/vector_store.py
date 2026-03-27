@@ -40,8 +40,8 @@ def index_chunks(chunks: list, filename: str):
         existing = collection.get(where={"source": filename})
         if existing["ids"]:
             collection.delete(where={"source": filename})
-    except:
-        pass
+    except Exception as e:
+        print(f"⚠️ Could not clear old index for '{filename}': {e}")
 
     if not chunks:
         return 0
