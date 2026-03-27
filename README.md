@@ -1,5 +1,5 @@
 # 🧠 RK StudyMind
-> Your Personal AI-Powered Study Companion — Built by RoniKid @ GCTU
+> Your Personal AI-Powered Study Companion — Built by RoniKid
 
 RK StudyMind is a fully offline AI study app that lets you chat with your lecture notes and textbooks, generate flashcards, search semantically across documents, and more — all running locally on your PC using LM Studio.
 
@@ -77,8 +77,7 @@ StudyMind/
 ---
 
 ## 👤 Author
-**RoniKid** — Level 100 Computer Engineering Student, GCTU Ghana  
-Interests: Cybersecurity · Blender 3D · AI Development
+**RoniKid** 
 
 ---
 

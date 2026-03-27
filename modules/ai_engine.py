@@ -17,7 +17,7 @@ def ask_lmstudio(prompt: str, context: str = "", system_prompt: str = "") -> str
 
     if not system_prompt:
         system_prompt = (
-            "You are StudyMind, a helpful AI study assistant for a Computer Engineering student at GCTU Ghana. "
+            "You are RK StudyMind, a helpful personal AI study assistant. "
             "Answer questions clearly and concisely based on the provided document context. "
             "If the answer is not in the context, say so honestly. "
             "Always be direct, educational, and beginner-friendly."
@@ -39,7 +39,7 @@ def ask_lmstudio(prompt: str, context: str = "", system_prompt: str = "") -> str
         })
 
     payload = {
-        "model": "local-model",  # LM Studio ignores this, uses whatever is loaded
+        "model": "local-model",
         "messages": messages,
         "temperature": 0.7,
         "max_tokens": 1024,
@@ -51,7 +51,7 @@ def ask_lmstudio(prompt: str, context: str = "", system_prompt: str = "") -> str
             LM_STUDIO_URL,
             headers={"Content-Type": "application/json"},
             data=json.dumps(payload),
-            timeout=120  # wait up to 2 minutes for response
+            timeout=120
         )
 
         if response.status_code == 200:

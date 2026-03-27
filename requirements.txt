@@ -4,3 +4,4 @@ chromadb
 PyMuPDF
 sentence-transformers
 requests
+python-docx
