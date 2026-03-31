@@ -75,7 +75,7 @@ def ask_lmstudio(prompt: str, context: str = "", system_prompt: str = "") -> str
 
 
 def check_lmstudio_connection() -> str:
-    """Checks if LM Studio server is running."""
+    """Checks if LM Studio server is running. Returns a status string."""
     try:
         response = requests.get("http://localhost:1234/v1/models", timeout=5)
         if response.status_code == 200:
@@ -84,6 +84,10 @@ def check_lmstudio_connection() -> str:
             if model_list:
                 return f"✅ LM Studio connected! Loaded model: {model_list[0]}"
             return "✅ LM Studio connected! No model loaded yet — please load one."
-        return "⚠️ LM Studio responded but returned unexpected data."
-    except:
-        return "❌ LM Studio not detected. Please open LM Studio and start the local server."
+        return f"⚠️ LM Studio responded with status {response.status_code}."
+    except requests.exceptions.ConnectionError:
+        return "❌ LM Studio not detected. Open LM Studio and start the local server."
+    except requests.exceptions.Timeout:
+        return "⏱️ LM Studio connection timed out."
+    except Exception as e:
+        return f"⚠️ Unexpected error checking LM Studio: {str(e)}"

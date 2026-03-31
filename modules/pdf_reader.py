@@ -42,10 +42,8 @@ def read_docx(file_path: str) -> str:
         from docx import Document
         doc = Document(file_path)
         full_text = ""
-        para_num = 0
         for para in doc.paragraphs:
             if para.text.strip():
-                para_num += 1
                 full_text += f"{para.text}\n"
         # Also extract text from tables
         for table in doc.tables:
@@ -73,16 +71,17 @@ def get_page_count(file_path: str) -> int:
             count = len(doc)
             doc.close()
             return count
-        except:
+        except Exception as e:
+            print(f"⚠️ Could not get PDF page count: {e}")
             return 0
     elif ext == ".docx":
         try:
             from docx import Document
             doc = Document(file_path)
-            # Count non-empty paragraphs as a proxy for "pages"
             count = sum(1 for p in doc.paragraphs if p.text.strip())
             return count
-        except:
+        except Exception as e:
+            print(f"⚠️ Could not get DOCX paragraph count: {e}")
             return 0
     return 0
 

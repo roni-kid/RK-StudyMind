@@ -4,29 +4,42 @@ from modules.ai_engine import ask_lmstudio
 
 # =============================================
 # 🃏 Flashcard Generation Module
-# Batched generation — supports up to 40 cards reliably
+# Fix #2: deduplication across batches
 # =============================================
 
 BATCH_SIZE = 10
 
 def generate_flashcards(text: str, filename: str, num_cards: int = 10) -> list:
     """
-    Generates flashcards in batches of 10 using a while loop.
-    Retries each batch up to 2 times if it returns fewer cards than expected.
+    Generates flashcards in batches of 10.
+    Fix #2: passes already-generated questions to each new batch
+    so the model avoids generating duplicates.
     """
     words = text.split()
-    context = " ".join(words[:4000])  # increased context window
+    context = " ".join(words[:4000])
 
     all_cards = []
-    max_attempts = (num_cards // BATCH_SIZE + 2) * 3  # safety cap on total attempts
+    seen_questions = set()
+    max_attempts = (num_cards // BATCH_SIZE + 2) * 3
     attempts = 0
 
     while len(all_cards) < num_cards and attempts < max_attempts:
         remaining = num_cards - len(all_cards)
         to_generate = min(BATCH_SIZE, remaining)
-        cards = _generate_batch(context, to_generate, start_index=len(all_cards) + 1)
-        if cards:
-            all_cards.extend(cards)
+        cards = _generate_batch(
+            context=context,
+            num_cards=to_generate,
+            start_index=len(all_cards) + 1,
+            existing_questions=[c["question"] for c in all_cards]
+        )
+        # Deduplicate by normalised question text
+        for card in cards:
+            norm = card["question"].lower().strip()
+            if norm not in seen_questions:
+                seen_questions.add(norm)
+                all_cards.append(card)
+            if len(all_cards) >= num_cards:
+                break
         attempts += 1
 
     return all_cards[:num_cards] if all_cards else [
@@ -35,21 +48,27 @@ def generate_flashcards(text: str, filename: str, num_cards: int = 10) -> list:
     ]
 
 
-def _generate_batch(context: str, num_cards: int, start_index: int = 1) -> list:
-    """Generates a single batch of up to 10 flashcards."""
-    prompt = f"""Read the following document and create exactly {num_cards} study flashcards.
+def _generate_batch(context: str, num_cards: int, start_index: int = 1,
+                    existing_questions: list = None) -> list:
+    """Generates a single batch, avoiding previously generated questions."""
 
+    # Build avoidance block so model doesn't repeat earlier cards
+    avoid_block = ""
+    if existing_questions:
+        avoid_list = "\n".join(f"- {q}" for q in existing_questions[-20:])  # show last 20
+        avoid_block = f"\nDo NOT repeat any of these already-generated questions:\n{avoid_list}\n"
+
+    prompt = f"""Read the following document and create exactly {num_cards} NEW study flashcards.
+{avoid_block}
 Use EXACTLY this format:
 {start_index}. Q: [question here]
-   A: [answer here]
-
-{start_index + 1}. Q: [question here]
    A: [answer here]
 
 Rules:
 - Questions must be specific and based only on the document
 - Answers must be short and clear (1-2 sentences max)
 - No extra text, headers, or explanations
+- Each question must be unique and different from those listed above
 - Start immediately with "{start_index}. Q:"
 
 Document:

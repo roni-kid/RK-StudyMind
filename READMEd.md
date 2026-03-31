@@ -1,19 +1,20 @@
 # 🧠 RK StudyMind
 > Your Personal AI-Powered Study Companion — Built by RoniKid
 
-RK StudyMind is a fully offline AI study app that lets you chat with your lecture notes, generate flashcards with score tracking, take multiple choice quizzes, and generate interactive mindmaps — all running locally on your PC using LM Studio. No internet, no API keys, no subscriptions.
+RK StudyMind is a fully offline AI study app that lets you chat with your lecture notes, generate flashcards with a score system, take multiple choice quizzes, auto-summarize documents, generate interactive mindmaps, and more — all running locally on your PC using LM Studio. No internet, no API keys, no subscriptions.
 
 ---
 
-## ✨ Features — v1.1
+## ✨ Features — v1.0
 
 | Feature | Description |
 |---|---|
-| 📚 **Document Library** | Upload multiple PDFs and DOCX files. Styled document cards show file type, page count, word count and chunk count. Select and set an active document or remove one with a single click. |
-| 💬 **Document Q&A (RAG)** | Chat with your documents using Retrieval Augmented Generation. Rendered as proper chat bubbles with a live "Thinking…" indicator while the AI responds. Supports active-document-only or all-documents search scope. |
-| 📝 **Smart Quiz** | Auto-generates multiple choice questions (A–D) with a progress bar, live score pill, inline answer selection, and a final results screen. Everything lives inside the quiz card. |
-| 🃏 **Flashcards** | Generates up to 40 Q&A study cards. One card at a time with ✅ / ❌ score tracking, a live score bar, and a session results screen. |
-| 🗺️ **Mindmap** | AI generates a structured topic map rendered as an interactive visual mindmap — embedded directly inside the app using Markmap.js. No external browser required. Shows a live loading state while generating. |
+| 📚 **Document Library** | Upload multiple PDFs and DOCX files at once. Switch between documents or query across all of them. |
+| 💬 **Document Q&A (RAG)** | Ask questions and get answers from your documents using Retrieval Augmented Generation — finds relevant content from anywhere in the document. |
+| 📝 **Smart Quiz** | Auto-generates multiple choice questions (A/B/C/D) with instant feedback, explanations, and a final score screen. |
+| ✍️ **Auto Summary** | One-click Quick Summary (5 bullet points) or Detailed Summary with full structured breakdown. Select which documents to summarize. |
+| 🃏 **Flashcards** | Generates up to 40 Q&A study cards using batched generation. One card at a time with ✅❌ score tracking and a results screen. |
+| 🗺️ **Mindmap** | AI generates a structured topic map rendered as an interactive visual mindmap in your browser using Markmap.js. |
 | 🔍 **Semantic Search** | ChromaDB + sentence-transformers power meaning-based search across all your documents. |
 
 ---
@@ -22,11 +23,11 @@ RK StudyMind is a fully offline AI study app that lets you chat with your lectur
 
 | Layer | Tool |
 |---|---|
-| UI | Gradio (Python) |
+| UI | Gradio 6.0+ (Python) |
 | AI Brain | LM Studio (100% Offline, any local model) |
 | Document Reading | PyMuPDF (PDF) + python-docx (DOCX) |
 | Semantic Search | ChromaDB + sentence-transformers |
-| Mindmap Rendering | Markmap.js (embedded iframe) |
+| Mindmap Rendering | Markmap.js (browser-based) |
 | Embeddings | all-MiniLM-L6-v2 (local, auto-downloaded once) |
 
 ---
@@ -67,18 +68,20 @@ Your browser will open automatically at `http://127.0.0.1:7860`
 ---
 
 ## 📁 Project Structure
+
 ```
 StudyMind/
 ├── modules/
 │   ├── ai_engine.py       # LM Studio connection & prompting
 │   ├── pdf_reader.py      # PDF & DOCX text extraction and chunking
 │   ├── vector_store.py    # ChromaDB semantic search & indexing
-│   ├── doc_library.py     # Multi-document library management & HTML rendering
+│   ├── doc_library.py     # Multi-document library management
 │   ├── flashcards.py      # Flashcard generation (batched, up to 40)
 │   ├── quiz.py            # Multiple choice quiz generation & parsing
+│   ├── summary.py         # Quick & detailed summary generation
 │   ├── mindmap.py         # Mindmap markdown generation & HTML rendering
 │   └── __init__.py
-├── data/                  # ChromaDB vector store + library metadata
+├── data/                  # ChromaDB vector store + mindmap HTML files
 ├── assets/                # Icons and images
 ├── app.py                 # Main Gradio app (all tabs and UI)
 ├── requirements.txt       # Python dependencies
@@ -89,8 +92,10 @@ StudyMind/
 ---
 
 ## 📋 Requirements
+
 ```
 gradio
+anthropic
 chromadb
 PyMuPDF
 sentence-transformers
@@ -125,30 +130,25 @@ pip install -r requirements.txt
 
 ---
 
-## 🗺️ Changelog
+## 🗺️ Roadmap
 
-### ✅ Version 1.1 — Current
-- **Q&A** — Full chat bubble UI with right-aligned user messages, left-aligned AI responses, live "Thinking…" indicator, and auto-scroll to latest message
-- **Quiz** — Completely redesigned: progress bar, live score pill, clickable option rows, inline Submit / Next / Results buttons — all inside a single card
-- **Library** — Styled document cards with PDF/DOCX type badges, ACTIVE indicator, radio selector + action buttons (Set Active, Remove, Refresh)
-- **Mindmap** — Now embedded directly in the app via `<iframe srcdoc>` — no external browser required; live loading spinner while generating
-- **Removed** — Auto Summary tab removed to streamline the app
-- **Status strips** — Every tab now uses styled HTML status strips (green/red) instead of raw Gradio textboxes
-- **Library sync** — Q&A status bar updates automatically when you upload, switch, or remove documents
-
-### ✅ Version 1.0
+### ✅ Version 1.0 — Complete
 - Multi-document library (PDF + DOCX)
 - RAG-powered Q&A with semantic search
 - Smart Quiz (MCQ with score)
 - Auto Summary (Quick + Detailed)
-- Flashcards with score system and results screen
+- Flashcards with score system and results screen (up to 40 cards)
 - Interactive Mindmap generator
+
+### 🔜 Version 1.1 — Coming Soon
+- Pomodoro Timer
+- *(More features TBA)*
 
 ---
 
 ## 👤 Author
 
-**RoniKid**
+**RoniKid** 
 
 ---
 
