@@ -20,6 +20,27 @@ uploads/
 *.gguf
 *.bin
 
+# Security scan reports — too large for GitHub
+bandit_report.json
+bandit_report.csv
+bandit_report.txt
+semgrep_report.txt
+
+# Large image files in root
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+
+# Patch/backup files
+*.bak
+_imports_patch.py
+_splash_patch.py
+
+# Gradio temp files
+.gradio/
+
 # OS junk
 .DS_Store
 Thumbs.db
@@ -31,3 +52,6 @@ desktop.ini
 
 # Logs
 *.log
+
+# Codex config
+.codex
