@@ -1,127 +1,94 @@
-import os
 import json
-
-# =============================================
-# 📁 Document Library Module
-# Fix #6: persist library to JSON so docs
-# survive app restarts, and clean up stale
-# ChromaDB entries on startup
-# =============================================
-
-LIBRARY_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "library.json")
-
-library = {}
-active_doc = {"filename": ""}
+import os
+import html as _html
 
 
-def _save_library():
-    """Persist library metadata (not full text) to disk."""
+LIBRARY_SNAPSHOT_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "data",
+    "library.json",
+)
+
+
+def save_library_snapshot(library: dict, active_doc_id: str = "") -> None:
     try:
-        os.makedirs(os.path.dirname(LIBRARY_PATH), exist_ok=True)
-        data = {
-            "active": active_doc["filename"],
-            "docs": {
-                fn: {
-                    "pages": info["pages"],
-                    "words": info["words"],
-                    "chunks_count": len(info["chunks"]),
-                }
-                for fn, info in library.items()
-            }
+        os.makedirs(os.path.dirname(LIBRARY_SNAPSHOT_PATH), exist_ok=True)
+        docs = []
+        for doc_id, info in (library or {}).items():
+            docs.append({
+                "id": doc_id,
+                "filename": info.get("filename", ""),
+                "text": info.get("text", ""),
+                "chunks": info.get("chunks", []),
+                "pages": info.get("pages", 0),
+                "unit_label": info.get("unit_label", "pages"),
+                "words": info.get("words", 0),
+            })
+        payload = {
+            "active_doc_id": active_doc_id or "",
+            "docs": docs,
         }
-        with open(LIBRARY_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        print(f"⚠️ Could not save library metadata: {e}")
+        with open(LIBRARY_SNAPSHOT_PATH, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    except Exception as exc:
+        print(f"⚠️ Could not save library snapshot: {exc}")
 
 
-def add_document(filename: str, text: str, chunks: list, pages: int):
-    """Add or update a document in the library."""
-    library[filename] = {
-        "text": text,
-        "chunks": chunks,
-        "pages": pages,
-        "words": len(text.split()),
-    }
-    if not active_doc["filename"]:
-        active_doc["filename"] = filename
-    _save_library()
-
-
-def set_active(filename: str):
-    """Switch active document."""
-    if filename in library:
-        active_doc["filename"] = filename
-        _save_library()
-        return True
-    return False
-
-
-def remove_document(filename: str):
-    """Remove a document from the library."""
-    if filename in library:
-        del library[filename]
-        if active_doc["filename"] == filename:
-            if library:
-                active_doc["filename"] = list(library.keys())[0]
-            else:
-                active_doc["filename"] = ""
-        _save_library()
-
-
-def get_active_text() -> str:
-    fn = active_doc["filename"]
-    return library[fn]["text"] if fn in library else ""
-
-
-def get_active_chunks() -> list:
-    fn = active_doc["filename"]
-    return library[fn]["chunks"] if fn in library else []
-
-
-def get_active_filename() -> str:
-    return active_doc["filename"]
-
-
-def get_all_filenames() -> list:
-    return list(library.keys())
-
-
-def get_doc_info(filename: str) -> dict:
-    return library.get(filename, {})
-
-
-def get_library_metadata() -> dict:
-    """
-    Fix #6: returns saved metadata (pages/words) for UI display
-    without needing the full text in memory.
-    """
+def load_library_snapshot() -> tuple[dict, str]:
     try:
-        if os.path.exists(LIBRARY_PATH):
-            with open(LIBRARY_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return {}
+        if not os.path.exists(LIBRARY_SNAPSHOT_PATH):
+            return {}, ""
+        with open(LIBRARY_SNAPSHOT_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        library = {}
+        for item in payload.get("docs", []):
+            doc_id = item.get("id")
+            if not doc_id:
+                continue
+            library[doc_id] = {
+                "id": doc_id,
+                "filename": item.get("filename", doc_id),
+                "text": item.get("text", ""),
+                "chunks": item.get("chunks", []),
+                "pages": item.get("pages", 0),
+                "unit_label": item.get("unit_label", "pages"),
+                "words": item.get("words", 0),
+            }
+        active_doc_id = payload.get("active_doc_id", "")
+        if active_doc_id not in library and library:
+            active_doc_id = next(iter(library))
+        return library, active_doc_id
+    except Exception as exc:
+        print(f"⚠️ Could not load library snapshot: {exc}")
+        return {}, ""
 
 
-def render_library_html() -> str:
-    if not library:
+def render_library_html(lib: dict = None, active_doc_id: str = None) -> str:
+    lib = {} if lib is None else lib
+    active_key = active_doc_id or ""
+
+    if not lib:
         return """
         <div style="display:flex;justify-content:center;align-items:center;min-height:120px;
                     border:2px dashed #334155;border-radius:16px;color:#64748b;
                     font-family:'Segoe UI',sans-serif;font-size:15px;">
-          No documents yet — upload PDFs or DOCX in the 📚 Library tab
+          No documents yet — upload PDF, DOCX, TXT, MD, PPTX, or EPUB in the 📚 Library tab
         </div>"""
 
     EXT_STYLES = {
         "PDF":  ("#185FA5", "#E6F1FB"),
         "DOCX": ("#0F6E56", "#E1F5EE"),
+        "TXT":  ("#9A6700", "#FFF3CD"),
+        "MD":   ("#7C3AED", "#EFE3FF"),
+        "PPTX": ("#C2410C", "#FEE7D6"),
+        "EPUB": ("#166534", "#DCFCE7"),
     }
 
     cards_html = ""
-    for fname, info in library.items():
-        is_active = fname == active_doc["filename"]
+    for doc_id, info in lib.items():
+        fname = info.get("filename", doc_id)
+        is_active = doc_id == active_key
+        safe_fname = _html.escape(fname)
         ext    = fname.rsplit(".", 1)[-1].upper() if "." in fname else "FILE"
         tc, bc = EXT_STYLES.get(ext, ("#5F5E5A", "#F1EFE8"))
         border = "border:2px solid #4F46E5;" if is_active else "border:1px solid #334155;"
@@ -130,6 +97,7 @@ def render_library_html() -> str:
             "padding:2px 10px;font-size:11px;font-weight:700;margin-left:8px;'>ACTIVE</span>"
             if is_active else ""
         )
+        unit_label = info.get("unit_label", "pages")
         cards_html += f"""
         <div style="background:#1e293b;{border}border-radius:14px;padding:16px 20px;
                     margin-bottom:10px;font-family:'Segoe UI',sans-serif;">
@@ -139,20 +107,24 @@ def render_library_html() -> str:
             <div style="flex:1;min-width:0;">
               <div style="color:#f1f5f9;font-weight:600;font-size:14px;
                           white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-                {fname}{active_badge}
+                {safe_fname}{active_badge}
               </div>
               <div style="color:#64748b;font-size:12px;margin-top:3px;">
-                {info['pages']} pages &nbsp;·&nbsp; {info['words']:,} words &nbsp;·&nbsp; {len(info['chunks'])} chunks
+                {info.get('pages', 0)} {_html.escape(str(unit_label))} &nbsp;·&nbsp; {info.get('words', 0):,} words &nbsp;·&nbsp; {len(info.get('chunks', []))} chunks
               </div>
             </div>
           </div>
         </div>"""
 
+    active_name = "None"
+    if active_key and active_key in lib:
+        active_name = lib[active_key].get("filename", active_key)
+    safe_active = _html.escape(active_name)
     return f"""
     <div style="font-family:'Segoe UI',sans-serif;">
       <div style="color:#94a3b8;font-size:12px;margin-bottom:10px;">
-        {len(library)} document(s) in library &nbsp;·&nbsp;
-        Active: <strong style="color:#818cf8;">{active_doc['filename'] or 'None'}</strong>
+        {len(lib)} document(s) in library &nbsp;·&nbsp;
+        Active: <strong style="color:#818cf8;">{safe_active}</strong>
       </div>
       {cards_html}
     </div>"""

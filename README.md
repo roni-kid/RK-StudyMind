@@ -9,12 +9,13 @@ RK StudyMind is a fully offline AI study app that lets you chat with your lectur
 
 | Feature | Description |
 |---|---|
-| 📚 **Document Library** | Upload multiple PDFs and DOCX files. Styled document cards show file type, page count, word count and chunk count. Select and set an active document or remove one with a single click. |
-| 💬 **Document Q&A (RAG)** | Chat with your documents using Retrieval Augmented Generation. Rendered as proper chat bubbles with a live "Thinking…" indicator while the AI responds. Supports active-document-only or all-documents search scope. |
-| 📝 **Smart Quiz** | Auto-generates multiple choice questions (A–D) with a progress bar, live score pill, inline answer selection, and a final results screen. Everything lives inside the quiz card. |
+| 📚 **Document Library** | Upload PDFs, DOCX, TXT, Markdown, PowerPoint (.pptx), and EPUB files. Styled document cards show file type, page/slide/chapter count, word count and chunk count. |
+| 💬 **Document Q&A (RAG)** | Chat with your documents using Retrieval Augmented Generation. Inter-font chat bubbles with right-aligned user messages, left-aligned AI responses with 🧠 avatar, timestamps, source badges, and an animated 3-dot typing indicator. |
+| 📝 **Smart Quiz** | Auto-generates multiple choice questions (A–D) with a progress bar, live score pill, inline answer selection, and a final results screen. Supports up to 40 questions with batch generation. |
 | 🃏 **Flashcards** | Generates up to 40 Q&A study cards. One card at a time with ✅ / ❌ score tracking, a live score bar, and a session results screen. |
-| 🗺️ **Mindmap** | AI generates a structured topic map rendered as an interactive visual mindmap — embedded directly inside the app using Markmap.js. No external browser required. Shows a live loading state while generating. |
+| 🗺️ **Mindmap** | AI generates a structured topic map rendered as an interactive radial canvas — embedded directly inside the app. Scroll to zoom, drag to pan, Reset/+/− controls. |
 | 🔍 **Semantic Search** | ChromaDB + sentence-transformers power meaning-based search across all your documents. |
+| 🖥️ **Splash Screen** | macOS-style spinner + segmented progress bar while the embedding model loads on startup. Dismisses automatically the moment the model is ready. |
 
 ---
 
@@ -22,12 +23,26 @@ RK StudyMind is a fully offline AI study app that lets you chat with your lectur
 
 | Layer | Tool |
 |---|---|
-| UI | Gradio (Python) |
+| UI | Gradio 6.0+ (Python) |
 | AI Brain | LM Studio (100% Offline, any local model) |
-| Document Reading | PyMuPDF (PDF) + python-docx (DOCX) |
+| Document Reading | PyMuPDF (PDF) · python-docx (DOCX) · python-pptx (PPTX) · ebooklib + BeautifulSoup (EPUB) · built-in (TXT, MD) |
 | Semantic Search | ChromaDB + sentence-transformers |
-| Mindmap Rendering | Markmap.js (embedded iframe) |
+| Mindmap Rendering | Custom HTML5 Canvas radial renderer (no external dependencies) |
 | Embeddings | all-MiniLM-L6-v2 (local, auto-downloaded once) |
+| Fonts | Inter (chat UI) · JetBrains Mono (code blocks) via Google Fonts |
+
+---
+
+## 📂 Supported File Types
+
+| Extension | Type | Extraction Method |
+|---|---|---|
+| `.pdf` | PDF | PyMuPDF — page by page |
+| `.docx` | Word Document | python-docx — paragraphs + tables |
+| `.pptx` | PowerPoint | python-pptx — slide text + tables + speaker notes |
+| `.epub` | Ebook | ebooklib + BeautifulSoup — chapter by chapter |
+| `.md` | Markdown | Built-in — strips `#`, `**`, `` ` `` markers before indexing |
+| `.txt` | Plain Text | Built-in — auto encoding fallback (utf-8 → latin-1 → cp1252) |
 
 ---
 
@@ -53,9 +68,11 @@ pip install -r requirements.txt
 
 ### 4. Start LM Studio
 - Open **LM Studio** on your PC
-- Load any model (e.g. `gemma-3-4b`, `nemotron-3-nano`, `mistral`, `deepseek`)
+- Load any model (e.g. `qwen3-4b`, `gemma-3-4b`, `mistral`, `deepseek`)
 - Go to the **Local Server** tab and click **Start Server**
 - Default port: `1234`
+
+> 💡 **Recommended**: Use a small, fast model like `qwen3-4b` or `gemma-3-4b` for best response times. Larger models (8B+) give richer answers but are slower.
 
 ### 5. Run the app
 ```bash
@@ -64,31 +81,35 @@ python app.py
 
 Your browser will open automatically at `http://127.0.0.1:7860`
 
+A splash screen will appear while the embedding model loads. It dismisses automatically when the model is ready — usually 10–30 seconds on first run.
+
 ---
 
 ## 📁 Project Structure
 ```
 StudyMind/
 ├── modules/
-│   ├── ai_engine.py       # LM Studio connection & prompting
-│   ├── pdf_reader.py      # PDF & DOCX text extraction and chunking
+│   ├── ai_engine.py       # LM Studio connection, prompting, is_lmstudio_online()
+│   ├── pdf_reader.py      # PDF, DOCX, TXT, MD, PPTX, EPUB text extraction + chunking
 │   ├── vector_store.py    # ChromaDB semantic search & indexing
 │   ├── doc_library.py     # Multi-document library management & HTML rendering
 │   ├── flashcards.py      # Flashcard generation (batched, up to 40)
-│   ├── quiz.py            # Multiple choice quiz generation & parsing
-│   ├── mindmap.py         # Mindmap markdown generation & HTML rendering
+│   ├── quiz.py            # MCQ generation — 3-strategy parser, batch loop, 40q support
+│   ├── mindmap.py         # Radial mindmap — Canvas renderer, no iframe needed
 │   └── __init__.py
-├── data/                  # ChromaDB vector store + library metadata
+├── data/                  # ChromaDB vector store + library metadata (JSON)
 ├── assets/                # Icons and images
-├── app.py                 # Main Gradio app (all tabs and UI)
+├── app.py                 # Main Gradio app (all tabs, UI, splash screen)
 ├── requirements.txt       # Python dependencies
 ├── push_to_github.bat     # One-click GitHub push script (Windows)
+├── CHANGELOG.md           # Full history of changes
 └── README.md
 ```
 
 ---
 
 ## 📋 Requirements
+
 ```
 gradio
 chromadb
@@ -96,6 +117,9 @@ PyMuPDF
 sentence-transformers
 requests
 python-docx
+python-pptx
+ebooklib
+beautifulsoup4
 ```
 
 Install all with:
@@ -119,28 +143,28 @@ pip install -r requirements.txt
 
 - RK StudyMind runs **100% offline** — no internet required after first setup
 - The embedding model (`all-MiniLM-L6-v2`, ~90MB) downloads automatically on first launch
-- Any model loaded in LM Studio works — larger models give better quality answers
+- The `UNEXPECTED key: embeddings.position_ids` warning in the terminal is harmless — it's a known `sentence-transformers` quirk
 - Scanned PDFs (image-based) are not supported — text-based PDFs only
-- Documents are stored in memory per session — re-upload after restarting the app
+- PowerPoint files extract text + speaker notes; images on slides are ignored
+- DRM-protected EPUBs cannot be extracted
+- Documents are persisted across sessions via `data/library.json`
 
 ---
 
 ## 🗺️ Changelog
 
 ### ✅ Version 1.1 — Current
-- **Q&A** — Full chat bubble UI with right-aligned user messages, left-aligned AI responses, live "Thinking…" indicator, and auto-scroll to latest message
-- **Quiz** — Completely redesigned: progress bar, live score pill, clickable option rows, inline Submit / Next / Results buttons — all inside a single card
-- **Library** — Styled document cards with PDF/DOCX type badges, ACTIVE indicator, radio selector + action buttons (Set Active, Remove, Refresh)
-- **Mindmap** — Now embedded directly in the app via `<iframe srcdoc>` — no external browser required; live loading spinner while generating
-- **Removed** — Auto Summary tab removed to streamline the app
-- **Status strips** — Every tab now uses styled HTML status strips (green/red) instead of raw Gradio textboxes
-- **Library sync** — Q&A status bar updates automatically when you upload, switch, or remove documents
+- **6 file formats** — PDF, DOCX, TXT, MD, PPTX, EPUB all supported in Library
+- **Chat UI** — Inter font, JetBrains Mono for code, timestamps, source badges, 3-dot typing indicator, proper bubble borders
+- **Splash screen** — macOS-style spinner + segmented bar, dismisses when embedding model is actually ready (polls signal — not a hardcoded timer)
+- **Quiz** — Up to 40 questions, batch generation, 3-strategy parser, running score
+- **Mindmap** — Radial Canvas renderer, no external browser needed
+- **LM Studio offline detection** — clear error bubbles before each generation attempt
 
 ### ✅ Version 1.0
 - Multi-document library (PDF + DOCX)
 - RAG-powered Q&A with semantic search
 - Smart Quiz (MCQ with score)
-- Auto Summary (Quick + Detailed)
 - Flashcards with score system and results screen
 - Interactive Mindmap generator
 

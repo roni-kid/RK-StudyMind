@@ -1,0 +1,11 @@
+from modules.ai_engine import ask_lmstudio, check_lmstudio_connection
+from modules.vector_store import index_chunks, search_similar_chunks
+from modules.flashcards import generate_flashcards
+from modules.mindmap import generate_mindmap_markdown, mindmap_to_html
+from modules.quiz import generate_quiz
+from modules.doc_library import (
+    library, active_doc,
+    add_document, set_active, remove_document,
+    get_active_text, get_active_chunks, get_active_filename,
+    get_all_filenames, get_doc_info, render_library_html
+)
