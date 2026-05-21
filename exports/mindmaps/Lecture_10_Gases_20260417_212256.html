@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lecture 10 Gases</title>
+<style>body{{margin:0;background:var(--rk-canvas,#0d1225);}}
+.rk-dot{{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--rk-primary-soft,#818cf8);margin:0 2px;animation:rk-dot-bounce 1.3s ease-in-out infinite;}}@keyframes rk-dot-bounce{{0%,80%,100%{{transform:translateY(0);opacity:.4}}40%{{transform:translateY(-7px);opacity:1}}}}</style>
+</head>
+<body>
+
+<div style="background:var(--rk-panel, #1a1f35);border-radius:18px;overflow:hidden;
+            border:1px solid var(--rk-border-strong, #2d3452);font-family:system-ui,-apple-system,sans-serif;
+            box-shadow:0 8px 32px var(--rk-shadow-strong, rgba(0,0,0,0.4));">
+
+  <!-- Toolbar -->
+  <div style="background:var(--rk-toolbar, #0f1428);border-bottom:1px solid var(--rk-border-strong, #2d3452);
+              padding:10px 16px;display:flex;align-items:center;
+              justify-content:space-between;flex-wrap:wrap;gap:8px;">
+    <span style="font-size:13px;font-weight:700;color:var(--rk-primary-text, #a5b4fc);">
+      🗺️ Lecture 10 Gases
+    </span>
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+      <button onclick="window['rkmm2_zoomIn']()" title="Zoom in" style="background:var(--rk-surface-1, #1e293b);border:1px solid var(--rk-border-strong, #2d3452);border-radius:6px;padding:5px 13px;color:var(--rk-text-muted, #94a3b8);font-size:12px;cursor:pointer;font-family:inherit;line-height:1;transition:background 0.15s;" onmouseover="this.style.background='var(--rk-surface-hover, #2d3f5f)'" onmouseout="this.style.background='var(--rk-surface-1, #1e293b)'">+</button>
+      <button onclick="window['rkmm2_zoomOut']()" title="Zoom out" style="background:var(--rk-surface-1, #1e293b);border:1px solid var(--rk-border-strong, #2d3452);border-radius:6px;padding:5px 13px;color:var(--rk-text-muted, #94a3b8);font-size:12px;cursor:pointer;font-family:inherit;line-height:1;transition:background 0.15s;" onmouseover="this.style.background='var(--rk-surface-hover, #2d3f5f)'" onmouseout="this.style.background='var(--rk-surface-1, #1e293b)'">−</button>
+      <button onclick="window['rkmm2_reset']()" title="Reset view" style="background:var(--rk-surface-1, #1e293b);border:1px solid var(--rk-border-strong, #2d3452);border-radius:6px;padding:5px 13px;color:var(--rk-text-muted, #94a3b8);font-size:12px;cursor:pointer;font-family:inherit;line-height:1;transition:background 0.15s;" onmouseover="this.style.background='var(--rk-surface-hover, #2d3f5f)'" onmouseout="this.style.background='var(--rk-surface-1, #1e293b)'">↺ Reset</button>
+      <button id="rkmm2_toggleAllBtn"
+        onclick="window['rkmm2_toggleAll']()"
+        style="background:var(--rk-surface-1, #1e293b);border:1px solid var(--rk-primary, #4F46E5);border-radius:6px;
+               padding:5px 13px;color:var(--rk-primary-text, #a5b4fc);font-size:12px;cursor:pointer;
+               font-family:inherit;line-height:1;transition:background 0.15s;"
+        onmouseover="this.style.background='var(--rk-primary-surface, #1a1f4a)'"
+        onmouseout="this.style.background='var(--rk-surface-1, #1e293b)'">⊟ Collapse All</button>
+      <span style="font-size:11px;color:var(--rk-text-dim, #475569);">Scroll · Drag · Touch</span>
+    </div>
+  </div>
+
+  <!-- SVG canvas -->
+  <div id="rkmm2_wrap"
+       style="background:var(--rk-canvas, #0d1225);overflow:hidden;width:100%;
+              cursor:grab;-webkit-user-select:none;user-select:none;touch-action:none;">
+    <svg id="rkmm2_svg"
+         viewBox="-115 -428 400 543"
+         preserveAspectRatio="xMidYMid meet"
+         style="width:100%;height:580px;display:block;overflow:visible;">
+      
+    <defs>
+      <filter id="rkmm2_sh" x="-40%" y="-40%" width="180%" height="180%"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="rgba(0,0,0,0.28)"/></filter>
+      <pattern id="rkmm2_grid" x="0" y="0" width="28" height="28"
+               patternUnits="userSpaceOnUse">
+        <circle cx="1" cy="1" r="1.1" fill="var(--rk-grid-dot, #2a3356)"/>
+      </pattern>
+    </defs>
+    <rect x="-115" y="-428"
+          width="400" height="543"
+          fill="url(#rkmm2_grid)"/>
+    <g id="rkmm2_pan">
+      <line x1="0" y1="0" x2="0" y2="-225" stroke="#F4A261" stroke-width="2.5" stroke-opacity="0.6"/>
+      <g id="rkmm2_leaves0" style="display:block;opacity:1;"><line x1="0" y1="-225" x2="0" y2="-350" stroke="#F4A261" stroke-width="1.8" stroke-opacity="0.45" stroke-dasharray="6,4"/><circle cx="0" cy="-350" r="33" fill="#FDEBD0" stroke="#F4A261" stroke-width="2" filter="url(#rkmm2_sh)"/><text text-anchor="middle" font-size="11" font-weight="600" fill="#1e293b" font-family="system-ui,-apple-system,sans-serif" pointer-events="none"><tspan x="0" y="-357" dominant-baseline="middle">Please</tspan><tspan x="0" y="-343" dominant-baseline="middle">Retry</tspan></text></g>
+      <g id="rkmm2_badge0" style="display:none;"><circle cx="31" cy="-256" r="13" fill="#F4D03F" stroke="#F4A261" stroke-width="2"/><text text-anchor="middle" dominant-baseline="central" x="31" y="-256" font-size="11" font-weight="bold" fill="#3D2800" font-family="system-ui" pointer-events="none">1</text></g>
+      <circle cx="0" cy="0" r="70" fill="#F4D03F" stroke="#C9A800" stroke-width="3" filter="url(#rkmm2_sh)"/><text text-anchor="middle" font-size="14" font-weight="bold" fill="#3D2800" font-family="system-ui,-apple-system,sans-serif" pointer-events="none"><tspan x="0" y="0" dominant-baseline="middle">Document</tspan></text><circle id="rkmm2_circle0" cx="0" cy="-225" r="48" fill="#F4A261" stroke="white" stroke-width="2.5" filter="url(#rkmm2_sh)" style="cursor:pointer;transition:opacity 0.25s;" onclick="window['rkmm2_toggle'](0)"/><text text-anchor="middle" font-size="12" font-weight="bold" fill="#5C2E00" font-family="system-ui,-apple-system,sans-serif" pointer-events="none"><tspan x="0" y="-232" dominant-baseline="middle">Could Not</tspan><tspan x="0" y="-218" dominant-baseline="middle">Generate</tspan></text><rect x="-48" y="-273" width="96" height="96" fill="transparent" style="cursor:pointer;" onclick="window['rkmm2_toggle'](0)"/>
+    </g>
+    </svg>
+  </div>
+
+  <!-- Legend -->
+  <div style="background:var(--rk-toolbar, #0f1428);border-top:1px solid var(--rk-border-strong, #2d3452);
+              padding:8px 16px;font-size:11px;color:var(--rk-text-dim, #475569);display:flex;
+              gap:16px;flex-wrap:wrap;align-items:center;">
+    <span>🟡 Centre = main topic</span>
+    <span>● Coloured circles = branches — click to hide/show leaves</span>
+    <span>○ Small circles = key points</span>
+    <span>№ badge = hidden leaf count</span>
+  </div>
+</div>
+
+<script>
+(function() {
+
+  // ── State ──────────────────────────────────────────────────────
+  var N         = 1;
+  var collapsed = [false];
+  var tx = 0, ty = 0, sc = 1;
+  var wrap = document.getElementById('rkmm2_wrap');
+  var panG = document.getElementById('rkmm2_pan');
+
+  function applyTransform() {
+    if (panG) panG.setAttribute('transform',
+      'translate(' + tx + ',' + ty + ') scale(' + sc + ')');
+  }
+
+  // ── Zoom toward a point in wrap-local coordinates ─────────────
+  function zoomAt(cx, cy, factor) {
+    var newSc = Math.max(0.15, Math.min(7, sc * factor));
+    tx = cx - (cx - tx) * (newSc / sc);
+    ty = cy - (cy - ty) * (newSc / sc);
+    sc = newSc;
+    applyTransform();
+  }
+
+  // ── Scroll-wheel zoom toward cursor ───────────────────────────
+  if (wrap) {
+    wrap.addEventListener('wheel', function(e) {
+      e.preventDefault();
+      var rect = wrap.getBoundingClientRect();
+      zoomAt(e.clientX - rect.left, e.clientY - rect.top,
+             e.deltaY < 0 ? 1.12 : 0.89);
+    }, { passive: false });
+  }
+
+  // ── Pointer drag (no document listeners — fixes memory leak) ──
+  // Uses only events on wrap itself.
+  // pointerleave acts as a fallback mouseup if cursor exits the div.
+  var dragging = false, dragStarted = false;
+  var psx = 0, psy = 0, stx = 0, sty = 0;
+
+  if (wrap) {
+    wrap.addEventListener('pointerdown', function(e) {
+      if (e.button !== 0 && e.pointerType === 'mouse') return;
+      dragging = true; dragStarted = false;
+      psx = e.clientX; psy = e.clientY; stx = tx; sty = ty;
+      wrap.style.cursor = 'grabbing';
+    });
+
+    wrap.addEventListener('pointermove', function(e) {
+      if (!dragging) return;
+      var dx = e.clientX - psx, dy = e.clientY - psy;
+      // 5px threshold — prevents accidental pan on a simple click
+      if (!dragStarted) {
+        if (Math.sqrt(dx * dx + dy * dy) < 5) return;
+        dragStarted = true;
+      }
+      tx = stx + dx; ty = sty + dy;
+      applyTransform();
+    });
+
+    wrap.addEventListener('pointerup',    _endDrag);
+    wrap.addEventListener('pointerleave', _endDrag);  // backup
+  }
+
+  function _endDrag() {
+    dragging = false; dragStarted = false;
+    if (wrap) wrap.style.cursor = 'grab';
+  }
+
+  // ── Per-branch collapse / expand ──────────────────────────────
+  window['rkmm2_toggle'] = function(bi) {
+    if (bi < 0 || bi >= N) return;   // guard for empty-branch edge case
+    collapsed[bi] = !collapsed[bi];
+
+    var leaves = document.getElementById('rkmm2_leaves' + bi);
+    var badge  = document.getElementById('rkmm2_badge'  + bi);
+    var circ   = document.getElementById('rkmm2_circle' + bi);
+    if (!leaves) return;
+
+    if (collapsed[bi]) {
+      leaves.style.transition = 'opacity 0.25s';
+      leaves.style.opacity    = '0';
+      setTimeout(function() { leaves.style.display = 'none'; }, 260);
+      if (badge) badge.style.display = 'block';
+      if (circ)  circ.style.opacity  = '0.55';
+    } else {
+      leaves.style.display    = 'block';
+      leaves.style.opacity    = '0';
+      leaves.style.transition = 'opacity 0.25s';
+      setTimeout(function() { leaves.style.opacity = '1'; }, 10);
+      if (badge) badge.style.display = 'none';
+      if (circ)  circ.style.opacity  = '1';
+    }
+
+    // Sync the global button label after every per-branch toggle
+    _syncToggleBtn();
+  };
+
+  function _syncToggleBtn() {
+    var allAreCollapsed = N > 0 && collapsed.every(function(c) { return c; });
+    var btn = document.getElementById('rkmm2_toggleAllBtn');
+    if (btn) btn.textContent = allAreCollapsed ? '⊞ Expand All' : '⊟ Collapse All';
+  }
+
+  // ── Global Collapse All / Expand All ─────────────────────────
+  window['rkmm2_toggleAll'] = function() {
+    // Read actual current state rather than trusting the variable
+    var allAreCollapsed = N > 0 && collapsed.every(function(c) { return c; });
+    var target = !allAreCollapsed;   // if all collapsed → expand; else → collapse
+
+    for (var bi = 0; bi < N; bi++) {
+      collapsed[bi] = target;
+      var leaves = document.getElementById('rkmm2_leaves' + bi);
+      var badge  = document.getElementById('rkmm2_badge'  + bi);
+      var circ   = document.getElementById('rkmm2_circle' + bi);
+      if (!leaves) continue;
+
+      if (target) {
+        leaves.style.transition = 'opacity 0.2s';
+        leaves.style.opacity    = '0';
+        (function(l, b, c) {
+          setTimeout(function() {
+            l.style.display = 'none';
+            if (b) b.style.display = 'block';
+            if (c) c.style.opacity = '0.55';
+          }, 220);
+        })(leaves, badge, circ);
+      } else {
+        leaves.style.display    = 'block';
+        leaves.style.opacity    = '0';
+        leaves.style.transition = 'opacity 0.2s';
+        if (badge) badge.style.display = 'none';
+        if (circ)  circ.style.opacity  = '1';
+        (function(l) {
+          setTimeout(function() { l.style.opacity = '1'; }, 10);
+        })(leaves);
+      }
+    }
+
+    var btn = document.getElementById('rkmm2_toggleAllBtn');
+    if (btn) btn.textContent = target ? '⊞ Expand All' : '⊟ Collapse All';
+  };
+
+  // ── Zoom buttons (zoom toward canvas centre) ──────────────────
+  window['rkmm2_zoomIn']  = function() {
+    var r = wrap ? wrap.getBoundingClientRect() : {width:480, height:300};
+    zoomAt(r.width / 2, r.height / 2, 1.2);
+  };
+  window['rkmm2_zoomOut'] = function() {
+    var r = wrap ? wrap.getBoundingClientRect() : {width:480, height:300};
+    zoomAt(r.width / 2, r.height / 2, 1 / 1.2);
+  };
+  window['rkmm2_reset']   = function() { tx = 0; ty = 0; sc = 1; applyTransform(); };
+
+})();
+</script>
+
+</body>
+</html>

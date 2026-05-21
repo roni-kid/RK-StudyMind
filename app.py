@@ -13,14 +13,21 @@ from modules.ai_engine import ask_lmstudio, check_lmstudio_connection, is_lmstud
 import time
 from modules.vector_store import (
     index_chunks, search_similar_chunks, preload_model_background,
-    is_model_ready, clear_index, drop_session
+    is_model_ready, clear_index, drop_session, get_embed_backend
+)
+from modules.engine_manager import (
+    get_active_mode, get_theme, set_theme,
+    ask, get_engine_status,
 )
 
 # Kick off embedding model load in background immediately at startup
 preload_model_background()
-from modules.flashcards import generate_flashcards
-from modules.mindmap import generate_mindmap_markdown, mindmap_to_html
-from modules.quiz import generate_quiz
+
+from modules.adaptive_chunking import adaptive_strategy, initialize_adaptive_strategy
+_adaptive_model_info = initialize_adaptive_strategy()
+from modules.flashcards import generate_flashcards_result
+from modules.mindmap import generate_mindmap_tree_result, mindmap_to_html, save_mindmap_file
+from modules.quiz import generate_quiz_result
 from modules.doc_library import render_library_html, save_library_snapshot, load_library_snapshot
 from modules.exporters import export_flashcards_csv, export_quiz_report
 from modules.study_context import build_balanced_context
@@ -30,8 +37,23 @@ from modules.study_history import (
     get_quiz_analytics,
     get_hard_flashcards,
 )
-# ── Math renderer: converts LaTeX → readable unicode/HTML ─────────
-from modules.math_renderer import render_math, render_math_html
+from modules.math_renderer import render_math, render_math_html, render_plain_math_html
+from _splash_patch import SPLASH_JS as _SPLASH_JS, css as _SPLASH_CSS
+
+# ── Config + File Profiler ────────────────────────────────────────────────────
+from modules.file_profiler import load_config, get_profiler
+
+_config        = load_config()
+_file_profiler = get_profiler()
+
+MAX_FILES_PER_UPLOAD = _config["max_files_per_upload"]
+MAX_DOCS_PER_SESSION = _config["max_docs_per_session"]
+MAX_FILE_SIZE_BYTES  = _config["max_file_size_mb"] * 1024 * 1024
+MAX_DOC_WORDS        = _config["max_doc_words"]
+MAX_TOTAL_WORDS      = _config["max_total_words"]
+MAX_DOC_CHUNKS       = _config["max_doc_chunks"]
+MAX_DOC_UNITS        = 1500  # page/unit hard cap (not tunable via config)
+# ─────────────────────────────────────────────────────────────────────────────
 
 STUDY_TIPS = [
     "💡 Tip: Upload multiple PDFs at once by holding Ctrl while selecting files.",
@@ -42,14 +64,19 @@ STUDY_TIPS = [
     "💡 Tip: If quiz quality is low, try a document with more detailed text content.",
 ]
 
-MAX_FILES_PER_UPLOAD = 5
-MAX_DOCS_PER_SESSION = 20
-MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024
-MAX_DOC_WORDS = 40000
-MAX_TOTAL_WORDS = 150000
-MAX_DOC_UNITS = 1500
-MAX_DOC_CHUNKS = 250
 DIFFICULTY_CHOICES = ["Easy", "Medium", "Hard", "Difficult"]
+
+APP_VERSION = "v1.2"
+
+
+def generation_status_note(result: dict) -> str:
+    note = str((result or {}).get("note") or "").strip()
+    return f" · {note}" if note else ""
+
+
+def safe_ui_str(s: str) -> str:
+    """Strip lone surrogate code points that orjson/Gradio cannot serialize."""
+    return s.encode("utf-8", errors="replace").decode("utf-8")
 
 
 def new_session_state() -> dict:
@@ -287,6 +314,44 @@ def render_missed_topics_html(session_state) -> str:
         "</div>"
     )
 
+
+# ── Engine section render helpers ────────────────────────────────
+
+def render_engine_status_html() -> str:
+    status   = get_engine_status()
+    s_color  = "#10b981" if status["online"] else "#ef4444"
+    backend  = get_embed_backend()
+    eb_color = "#10b981" if backend == "LM Studio" else ("#f59e0b" if "local" in backend else "#64748b")
+    eb_icon  = "⚡" if backend == "LM Studio" else "🧩"
+
+    # Adaptive model info
+    try:
+        model_info = adaptive_strategy.detect_model()
+        m_status   = model_info["status"]
+        ctx_tokens = model_info["context_tokens"]
+        ctx_words  = model_info["context_max_words"]
+        m_color    = "#10b981" if "✅" in m_status else "#f59e0b"
+        ctx_line   = (f'<div style="font-size:11px;color:#64748b;margin-top:3px;">'
+                      f'Context window: {ctx_tokens:,} tokens · {ctx_words:,} words safe</div>')
+    except Exception:
+        m_status, m_color, ctx_line = "⚠️ Model unknown", "#f59e0b", ""
+
+    return (
+        f'<div style="background:#1e293b;border:1px solid #334155;border-radius:12px;'
+        f'padding:14px 18px;font-family:\'Segoe UI\',sans-serif;">'
+        f'<div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:6px;">'
+        f'🔧 LM Studio '
+        f'<span style="font-size:11px;font-weight:400;color:#64748b;">— localhost:1234</span></div>'
+        f'<div style="font-size:12px;color:{s_color};margin-bottom:4px;">{_html.escape(str(status["status_msg"]))}</div>'
+        f'<div style="font-size:11px;color:{m_color};margin-bottom:2px;">{_html.escape(m_status)}</div>'
+        f'{ctx_line}'
+        f'<div style="font-size:11px;color:#475569;margin-top:6px;">Connect your own model via LM Studio</div>'
+        f'<div style="margin-top:8px;padding-top:8px;border-top:1px solid #334155;'
+        f'font-size:11px;color:{eb_color};">{eb_icon} Embeddings: {_html.escape(backend)}</div>'
+        f'</div>'
+    )
+
+
 # ── Home ─────────────────────────────────────────────────────────
 def render_home_stats(session_state, ai_status: str = "") -> str:
     library = get_library(session_state)
@@ -296,11 +361,11 @@ def render_home_stats(session_state, ai_status: str = "") -> str:
     tip = random.choice(STUDY_TIPS)
 
     if not ai_status:
-        ai_color, ai_icon, ai_label = "#475569", "⚙️", "Not checked"
+        ai_color, ai_label = "#475569", "Not checked"
     elif "✅" in ai_status:
-        ai_color, ai_icon, ai_label = "#10b981", "✅", "Connected"
+        ai_color, ai_label = "#10b981", "Connected"
     else:
-        ai_color, ai_icon, ai_label = "#ef4444", "❌", "Offline"
+        ai_color, ai_label = "#ef4444", "Offline"
 
     def stat_card(icon, value, label, color):
         return (f'<div style="background:#1e293b;border:1px solid #334155;border-radius:16px;'
@@ -310,7 +375,7 @@ def render_home_stats(session_state, ai_status: str = "") -> str:
                 f'<div style="font-size:12px;color:#64748b;margin-top:4px;">{label}</div>'
                 f'</div>')
 
-    def feature_card(icon, title, desc, tab_index):
+    def feature_card(icon, title, desc):
         return ('<div style="background:#1e293b;border:1px solid #334155;border-radius:16px;'
                 'padding:18px 12px;flex:1;min-width:130px;text-align:center;">'
                 f'<div style="font-size:28px;margin-bottom:8px;">{icon}</div>'
@@ -337,22 +402,22 @@ def render_home_stats(session_state, ai_status: str = "") -> str:
     <div style="font-size:15px;color:#a5b4fc;margin-top:8px;position:relative;">Your personal AI-powered study companion</div>
     <div style="display:inline-block;background:#4F46E5;color:#fff;border-radius:20px;
       padding:4px 18px;font-size:12px;font-weight:700;margin-top:16px;
-      letter-spacing:1px;position:relative;animation:pulseBadge 2s ease infinite;">v1.1</div>
+      letter-spacing:1px;position:relative;animation:pulseBadge 2s ease infinite;">{APP_VERSION}</div>
   </div>
   <div style="font-size:11px;font-weight:700;color:#475569;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:10px;">Library Stats</div>
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:24px;">
     {stat_card("📚", doc_count, "Documents", "#818cf8")}
     {stat_card("📝", f"{word_count:,}", "Words Indexed", "#34d399")}
     {stat_card("🔍", chunk_count, "Vector Chunks", "#f59e0b")}
-    {stat_card(ai_icon, ai_label, "AI Engine", ai_color)}
+    {stat_card("🔧", "LM Studio", "AI Engine", ai_color)}
   </div>
   <div style="font-size:11px;font-weight:700;color:#475569;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:10px;">Features</div>
   <div style="display:flex;gap:10px;flex-wrap:nowrap;overflow-x:auto;padding-bottom:6px;margin-bottom:20px;">
-    {feature_card("📚","Library","Upload & manage docs",1)}
-    {feature_card("💬","Q&A","Chat with documents",2)}
-    {feature_card("📝","Quiz","Multiple choice quiz",3)}
-    {feature_card("🃏","Flashcards","Score-tracked cards",4)}
-    {feature_card("🗺️","Mindmap","Radial visual maps",5)}
+    {feature_card("📚","Library","Upload & manage docs")}
+    {feature_card("💬","Q&A","Chat with documents")}
+    {feature_card("📝","Quiz","Multiple choice quiz")}
+    {feature_card("🃏","Flashcards","Score-tracked cards")}
+    {feature_card("🗺️","Mindmap","Structured study tree")}
   </div>
   <div style="background:#1e293b;border:1px solid #334155;border-left:4px solid #4F46E5;border-radius:12px;padding:14px 18px;">
     <div style="font-size:13px;color:#94a3b8;line-height:1.6;">{tip}</div>
@@ -362,7 +427,15 @@ def render_home_stats(session_state, ai_status: str = "") -> str:
 
 def refresh_home(session_state):
     session_state = ensure_session_state(session_state)
-    return render_home_stats(session_state, check_lmstudio_connection()), session_state
+    # Invalidate cached model detection so a model swap in LM Studio is picked up immediately
+    adaptive_strategy.invalidate_cache()
+    ai_status = check_lmstudio_connection() if get_active_mode() == "lmstudio" else ""
+    return (
+        render_home_stats(session_state, ai_status),
+        render_engine_status_html(),
+        session_state,
+    )
+
 
 # ── Library ───────────────────────────────────────────────────────
 def render_upload_info_html(msg, ok=True):
@@ -420,84 +493,144 @@ def load_files(session_state, files):
         results = []
     total_files = len(files)
     current_total_words = sum(info.get("words", 0) for info in library.values())
+
     for index, file in enumerate(files, start=1):
+        # Fast pre-check: session document cap
         if len(library) >= MAX_DOCS_PER_SESSION:
             results.append(f"⚠️ Session limit reached ({MAX_DOCS_PER_SESSION} documents).")
             break
-        fp = file.name
-        fn = os.path.basename(fp)
+
+        fp  = file.name
+        fn  = os.path.basename(fp)
         ext = os.path.splitext(fn)[1].lower()
+
         yield make_upload_outputs(
             session_state,
             f"⏳ Processing {index}/{total_files}: {fn}\n\n" + "\n".join(results or ["Preparing file…"]),
         )
+
         if ext not in ['.pdf', '.docx', '.txt', '.md', '.pptx', '.epub']:
-            results.append(f"❌ Skipped '{fn}': unsupported type"); continue
+            results.append(f"❌ Skipped '{fn}': unsupported type")
+            continue
+
         try:
             file_size = os.path.getsize(fp)
         except OSError:
             file_size = 0
+
         if file_size > MAX_FILE_SIZE_BYTES:
             results.append(f"❌ Skipped '{fn}': file too large ({file_size // (1024 * 1024)} MB)")
             continue
-        pc  = get_page_count(fp)
+
+        pc = get_page_count(fp)
         if pc and pc > MAX_DOC_UNITS:
             results.append(f"❌ Skipped '{fn}': document too large ({pc} {get_page_label(fp)})")
             continue
+
         yield make_upload_outputs(
             session_state,
             f"⏳ Processing {index}/{total_files}: {fn}\n\n📖 Reading document text…\n" + "\n".join(results),
         )
+
         raw = read_file(fp)
         if isinstance(raw, str) and raw.startswith(("❌", "⚠️")):
             results.append(f"❌ Skipped '{fn}': {raw}")
             continue
-        word_count = len(raw.split())
-        if word_count > MAX_DOC_WORDS:
-            results.append(f"❌ Skipped '{fn}': document too long ({word_count:,} words)")
-            continue
-        if current_total_words + word_count > MAX_TOTAL_WORDS:
-            results.append(f"❌ Skipped '{fn}': session word limit exceeded")
-            continue
-        cks = chunk_text(raw)
-        if not cks:
-            results.append(f"❌ Skipped '{fn}': no extractable text")
-            continue
-        if len(cks) > MAX_DOC_CHUNKS:
-            results.append(f"❌ Skipped '{fn}': too many chunks ({len(cks)})")
-            continue
 
-        doc_id = uuid.uuid4().hex
-        entry = {
-            "id": doc_id,
-            "filename": fn,
-            "text": raw,
-            "chunks": cks,
-            "pages": pc,
-            "unit_label": get_page_label(fp),
-            "words": word_count,
-        }
-        yield make_upload_outputs(
-            session_state,
-            f"⏳ Processing {index}/{total_files}: {fn}\n\n🧠 Indexing {len(cks)} chunks for semantic search…\n" + "\n".join(results),
-        )
-        try:
-            index_chunks(cks, doc_id=doc_id, filename=fn, session_id=session_state["session_id"])
-        except Exception as e:
-            results.append(f"❌ Skipped '{fn}': indexing failed ({e})")
-            continue
+        # ── File Profiler: plan the document (normal / stretch / split) ──
+        plans   = _file_profiler.plan_document(raw, fn, _config)
+        n_plans = len(plans)
 
-        library[doc_id] = entry
-        current_total_words += word_count
-        if not session_state.get("active_doc_id"):
-            session_state["active_doc_id"] = doc_id
-        persist_library(session_state)
-        icon = {'.pdf': '📄', '.docx': '📝', '.txt': '📃', '.md': '📋', '.pptx': '📊', '.epub': '📖'}.get(ext, '📄')
-        results.append(f"{icon} '{fn}' — {pc} {entry['unit_label']}, {word_count} words, {len(cks)} chunks")
-        yield make_upload_outputs(
-            session_state,
-            f"✅ Finished {index}/{total_files}: {fn}\n\n" + "\n".join(results) + f"\n📚 Total: {len(library)}",
-        )
+        if n_plans > 1:
+            yield make_upload_outputs(
+                session_state,
+                f"⏳ Processing {index}/{total_files}: {fn}\n\n"
+                f"📐 Large document — splitting into {n_plans} parts…\n"
+                + "\n".join(results),
+            )
+
+        # ── Process each plan entry ──────────────────────────────────────
+        for plan in plans:
+            plan_label = plan["label"]
+            plan_text  = plan["text"]
+            word_count = plan["word_count"]
+            split_idx  = plan["split_index"]   # int | None
+            split_tot  = plan["split_total"]   # int | None
+
+            # Session document cap (re-check per part for split files)
+            if len(library) >= MAX_DOCS_PER_SESSION:
+                tag = f"part {split_idx}/{split_tot} of " if split_idx else ""
+                results.append(f"⚠️ Session limit reached — skipping {tag}'{fn}'.")
+                break
+
+            # Session word cap
+            remaining_words = MAX_TOTAL_WORDS - current_total_words
+            if word_count > remaining_words:
+                tag = f"part {split_idx}/{split_tot} of " if split_idx else ""
+                results.append(f"⚠️ Session word limit reached — skipping {tag}'{fn}'.")
+                break
+
+            # ── Adaptive chunk size ───────────────────────────────────────
+            chunk_strategy = adaptive_strategy.compute_chunk_size(word_count)
+            cks = chunk_text(plan_text, chunk_size_tokens=chunk_strategy["chunk_size_tokens"])
+            if not cks:
+                results.append(f"❌ Skipped '{plan_label}': no extractable text")
+                continue
+            if len(cks) > MAX_DOC_CHUNKS:
+                results.append(f"❌ Skipped '{plan_label}': too many chunks ({len(cks)})")
+                continue
+
+            # ── Build library entry ───────────────────────────────────────
+            doc_id     = uuid.uuid4().hex
+            plan_pages = pc if n_plans == 1 else word_count
+            plan_unit  = get_page_label(fp) if n_plans == 1 else "words"
+            entry = {
+                "id":         doc_id,
+                "filename":   plan_label,
+                "text":       "",   # raw not stored; chunks are sufficient
+                "chunks":     cks,
+                "pages":      plan_pages,
+                "unit_label": plan_unit,
+                "words":      word_count,
+            }
+
+            part_tag = f"part {split_idx}/{split_tot} — " if split_idx else ""
+            yield make_upload_outputs(
+                session_state,
+                f"⏳ Processing {index}/{total_files}: {fn}\n\n"
+                f"🧠 Indexing {part_tag}{len(cks)} chunks ({chunk_strategy['strategy']})…\n"
+                + "\n".join(results),
+            )
+
+            try:
+                index_chunks(
+                    cks,
+                    doc_id=doc_id,
+                    filename=plan_label,
+                    session_id=session_state["session_id"],
+                )
+            except Exception as e:
+                results.append(f"❌ Skipped '{plan_label}': indexing failed ({e})")
+                continue
+
+            library[doc_id] = entry
+            current_total_words += word_count
+            if not session_state.get("active_doc_id"):
+                session_state["active_doc_id"] = doc_id
+            persist_library(session_state)
+
+            icon      = {'.pdf': '📄', '.docx': '📝', '.txt': '📃', '.md': '📋', '.pptx': '📊', '.epub': '📖'}.get(ext, '📄')
+            part_note = f" [split {split_idx}/{split_tot}]" if split_idx else ""
+            results.append(
+                f"{icon} '{plan_label}'{part_note} — {word_count:,} words, "
+                f"{len(cks)} chunks [{chunk_strategy['strategy']}]"
+            )
+            yield make_upload_outputs(
+                session_state,
+                f"✅ {'Part' if split_idx else 'File'} done: {plan_label}\n\n"
+                + "\n".join(results)
+                + f"\n📚 Total: {len(library)}",
+            )
 
     info = f"✅ {len(results)} result(s):\n" + "\n".join(results) + f"\n📚 Total: {len(library)}"
     yield make_upload_outputs(session_state, info)
@@ -530,37 +663,10 @@ def refresh_library(session_state):
 
 # ── Q&A ───────────────────────────────────────────────────────────
 def format_ai_message(text: str) -> str:
-    """
-    Converts AI response text to styled HTML.
-    Pipeline:
-      1. render_math_html() — converts ALL LaTeX/dollar-math to unicode HTML spans
-      2. Fenced code blocks → <pre><code>
-      3. **bold**, *italic*, `inline code`, numbered/bullet lists
-      4. Newlines → <br>
-    Math is handled BEFORE HTML escaping so symbols render correctly.
-    """
     if not text:
         return ""
-
-    # ── Step 1: Math → unicode HTML spans ────────────────────────
-    # render_math_html returns HTML (with <span> tags) — do NOT html.escape after this
     text = render_math_html(text)
-
-    # ── Step 2: Fenced code blocks ────────────────────────────────
-    FENCE = _re.compile(r'```(?:\w+)?\n?(.*?)```', _re.DOTALL)
-    def rfence(m):
-        code = _html.escape(m.group(1).strip())
-        return (f'<pre style="background:#0d1117;border:1px solid #30363d;border-radius:10px;'
-                f'padding:14px 18px;margin:10px 0;overflow-x:auto;font-family:monospace;'
-                f'font-size:12.5px;color:#c9d1d9;line-height:1.6;"><code>{code}</code></pre>')
-    text = FENCE.sub(rfence, text)
-
-    # ── Step 3: Markdown formatting (text is already HTML from step 1) ──
-    # HTML-escape plain text portions only — be careful not to escape the
-    # <span> tags inserted by render_math_html.
-    # We do line-level processing: escape non-tag parts.
     def escape_non_tags(s):
-        """Escape HTML special chars but leave existing tags intact."""
         result = []
         for part in _re.split(r'(<[^>]+>)', s):
             if part.startswith('<'):
@@ -568,8 +674,23 @@ def format_ai_message(text: str) -> str:
             else:
                 result.append(_html.escape(part))
         return ''.join(result)
-
     text = escape_non_tags(text)
+    FENCE = _re.compile(r'```(?:\w+)?\n?(.*?)```', _re.DOTALL)
+    def rfence(m):
+        code = m.group(1).strip()
+        return (f'<pre style="background:#0d1117;border:1px solid #30363d;border-radius:10px;'
+                f'padding:14px 18px;margin:10px 0;overflow-x:auto;font-family:monospace;'
+                f'font-size:12.5px;color:#c9d1d9;line-height:1.6;"><code>{code}</code></pre>')
+    text = FENCE.sub(rfence, text)
+    def convert_header(m):
+        level = len(m.group(1))
+        content = m.group(2).strip()
+        size    = {1: "18px", 2: "16px", 3: "14px"}.get(level, "14px")
+        margin  = {1: "14px 0 8px 0", 2: "12px 0 6px 0", 3: "10px 0 4px 0"}.get(level, "8px 0 4px 0")
+        border  = "border-bottom:1px solid #334155;padding-bottom:6px;" if level == 1 else ""
+        return (f'<div style="font-size:{size};font-weight:700;color:#f1f5f9;'
+                f'margin:{margin};{border}">{content}</div>')
+    text = _re.sub(r'(?m)^(#{1,3})\s+(.+)', convert_header, text)
     text = _re.sub(r'\*\*(.+?)\*\*', r'<strong style="color:#f1f5f9;">\1</strong>', text)
     text = _re.sub(r'(?<![*_])\*([^*\n]+?)\*(?![*_])', r'<em>\1</em>', text)
     text = _re.sub(r'`([^`]+)`',
@@ -614,11 +735,12 @@ def render_chat_bubbles(session_state):
                         f'background:linear-gradient(135deg,#312e81,#4F46E5);border:1px solid #4338ca;'
                         f'display:flex;align-items:center;justify-content:center;font-size:18px;'
                         f'box-shadow:0 2px 8px rgba(79,70,229,.3);">🧠</div>'
-                        f'<div style="display:flex;flex-direction:column;max-width:75%;">'
+                        f'<div style="display:flex;flex-direction:column;max-width:75%;min-width:0;">'
                         f'<div style="background:#1e293b;border:1px solid #334155;border-radius:4px 18px 18px 18px;'
                         f'padding:14px 18px;font-size:14px;color:#e2e8f0;line-height:1.75;'
+                        f'overflow-wrap:break-word;word-break:break-word;'
                         f'box-shadow:0 2px 10px rgba(0,0,0,.25);">{body}{sbadge}</div>{ts_html}</div></div>')
-    return (f'<div style="font-family:\'Segoe UI\',sans-serif;padding:12px 6px;display:flex;flex-direction:column;">'
+    return (f'<div id="rk_chat_inner" style="font-family:\'Segoe UI\',sans-serif;padding:12px 6px;display:flex;flex-direction:column;max-height:480px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#334155 #0f172a;">'
             f'{bubbles}</div>')
 
 THINKING_BUBBLE = """<div style="display:flex;gap:10px;margin-bottom:18px;align-items:flex-start;">
@@ -630,9 +752,8 @@ THINKING_BUBBLE = """<div style="display:flex;gap:10px;margin-bottom:18px;align-
   </div>
 </div>"""
 
-SCROLL_JS = """<script>(function(){var d=document.getElementById('rk_chat_display');if(!d)return;
-var s=d;while(s&&s!==document.body){if(s.scrollHeight>s.clientHeight+2){s.scrollTop=s.scrollHeight;break;}s=s.parentElement;}
-window.scrollTo(0,document.body.scrollHeight);})();</script>"""
+SCROLL_JS = """<script>(function(){var d=document.getElementById('rk_chat_inner');if(!d)return;
+d.scrollTop=d.scrollHeight;})();</script>"""
 
 def answer_question(session_state, question, chat_html, search_mode):
     session_state = ensure_session_state(session_state)
@@ -666,7 +787,8 @@ def answer_question(session_state, question, chat_html, search_mode):
             chunk_labels = ", ".join(str(item["chunk_index"] + 1) for item in evidence)
             source_note = f"Source: {active_doc['filename']} (chunks {chunk_labels})"
         else:
-            context = build_balanced_context(active_doc.get("chunks", []), max_words=4200, target_chunks=10)
+            _ctx_words = adaptive_strategy.detect_model()["context_max_words"]
+            context = build_balanced_context(active_doc.get("chunks", []), max_words=_ctx_words, target_chunks=10)
             source_note = f"Source: {active_doc['filename']} (balanced fallback)"
     else:
         all_chunks = []
@@ -688,13 +810,14 @@ def answer_question(session_state, question, chat_html, search_mode):
             context = "\n\n---\n\n".join(all_chunks)
             source_note = "Sources: " + "; ".join(source_parts[:4])
         else:
+            _ctx_words = adaptive_strategy.detect_model()["context_max_words"]
             context = build_balanced_context(
                 [chunk for info in library.values() for chunk in info.get("chunks", [])],
-                max_words=4200,
+                max_words=_ctx_words,
                 target_chunks=12,
             )
             source_note = f"Searched {len(library)} documents (balanced fallback)"
-    answer = ask_lmstudio(prompt=question, context=context)
+    answer = ask(prompt=question, context=context)
     chat_log.append(("RK StudyMind", f"{answer}\n\n_[{source_note}]_", datetime.now().strftime("%I:%M %p").lstrip("0")))
     yield render_chat_bubbles(session_state) + SCROLL_JS, "", session_state
 
@@ -708,7 +831,6 @@ def clear_chat(session_state):
 def render_quiz_question(q, index, total, selected=None, revealed=False, score=0):
     pct = int(((index+1)/total)*100)
     opts = ""
-    # ── Apply math rendering to question and all options ──────────
     q_text_rendered = _html.escape(render_math(q["question"]))
     for letter, text in q["options"].items():
         opt_rendered = _html.escape(render_math(text))
@@ -811,7 +933,8 @@ def start_quiz(session_state, num_q, selected_docs, difficulty):
     chunks = get_chunks_from_selection(selected_docs, session_state)
     if not chunks: return "⚠️ No text.", render_quiz_empty(), 0, None, False, 0, *qbm(), session_state, render_quiz_analytics_html()
     difficulty = difficulty if difficulty in DIFFICULTY_CHOICES else "Medium"
-    questions = generate_quiz(chunks=chunks, num_questions=int(num_q), difficulty=difficulty)
+    quiz_result = generate_quiz_result(chunks=chunks, num_questions=int(num_q), difficulty=difficulty)
+    questions = quiz_result.get("data", {}).get("questions", [])
     if not questions: return "⚠️ Could not generate quiz.", render_quiz_empty(), 0, None, False, 0, *qbm(), session_state, render_quiz_analytics_html()
     session_state["current_quiz"] = questions
     session_state["quiz_master"] = [dict(q) for q in questions]
@@ -822,7 +945,7 @@ def start_quiz(session_state, num_q, selected_docs, difficulty):
     session_state["current_quiz_difficulty"] = difficulty
     session_state["quiz_session_saved"] = False
     src = f"{len(selected_docs)} doc(s)" if len(selected_docs) > 1 else get_library(session_state)[selected_docs[0]]["filename"]
-    return (f"✅ {len(questions)} {difficulty.lower()} question(s) from: {src}",
+    return (f"✅ {len(questions)} {difficulty.lower()} question(s) from: {src}{generation_status_note(quiz_result)}",
             render_quiz_question(questions[0], 0, len(questions), score=0), 0, None, False, 0, *qbm(), session_state, render_quiz_analytics_html())
 
 def quiz_select_answer(session_state, qi, letter, rev, sc):
@@ -839,7 +962,6 @@ def quiz_submit(session_state, qi, letter, rev, sc):
     idx = int(qi); q = current_quiz[idx]
     is_correct = letter == q["answer"]
     ns = sc + (1 if is_correct else 0)
-
     attempts = session_state.get("quiz_attempts", [])
     while len(attempts) <= idx:
         attempts.append(None)
@@ -855,7 +977,6 @@ def quiz_submit(session_state, qi, letter, rev, sc):
         existing = {item.get("question", "").strip().lower() for item in session_state.get("quiz_wrong_questions", [])}
         if q["question"].strip().lower() not in existing:
             session_state["quiz_wrong_questions"].append(dict(q))
-
     return (render_quiz_question(q, idx, len(current_quiz), letter, True, ns), idx, letter, True, ns, *qrm(), session_state, render_quiz_analytics_html())
 
 def quiz_next(session_state, qi, letter, rev, sc):
@@ -886,14 +1007,12 @@ def quiz_restart(session_state):
     session_state["quiz_session_saved"] = False
     return (render_quiz_question(current_quiz[0], 0, len(current_quiz), score=0), 0, None, False, 0, *qbm(), session_state, render_quiz_analytics_html())
 
-
 def retry_wrong_quiz(session_state):
     session_state = ensure_session_state(session_state)
     wrong_questions = dedupe_cards(session_state.get("quiz_wrong_questions", []))
     if not wrong_questions:
         return ("ℹ️ No wrong answers to retry yet.",
                 render_quiz_empty(), 0, None, False, 0, *qbm(), session_state, render_quiz_analytics_html())
-
     session_state["current_quiz"] = [dict(item) for item in wrong_questions]
     session_state["quiz_attempts"] = [None] * len(wrong_questions)
     session_state["quiz_wrong_questions"] = []
@@ -901,7 +1020,6 @@ def retry_wrong_quiz(session_state):
     return (f"🔁 Retrying {len(wrong_questions)} wrong question(s).",
             render_quiz_question(session_state["current_quiz"][0], 0, len(session_state["current_quiz"]), score=0),
             0, None, False, 0, *qbm(), session_state, render_quiz_analytics_html())
-
 
 def study_missed_topics(session_state):
     session_state = ensure_session_state(session_state)
@@ -913,7 +1031,6 @@ def study_missed_topics(session_state):
         render_missed_topics_html(session_state),
         session_state,
     )
-
 
 def export_current_quiz_report(session_state):
     session_state = ensure_session_state(session_state)
@@ -972,7 +1089,6 @@ def render_results_html(correct, wrong, total):
 def render_card_html(card, index, total, revealed, correct=0, wrong=0):
     color = CARD_COLORS[index % len(CARD_COLORS)]
     sb = render_score_bar(correct, wrong, total)
-    # ── Apply math rendering to card text ─────────────────────────
     if not revealed:
         sl,content,tc,bg,bs = "QUESTION",_html.escape(render_math(card["question"])),"#ffffff",color,"border:none;"
         hint = "<div style='margin-top:24px;text-align:center;font-size:12px;color:rgba(255,255,255,.4);'>Think of the answer, then click 🔄 Reveal Answer</div>"
@@ -1013,15 +1129,17 @@ def make_flashcards(session_state, num_cards, selected_docs, difficulty):
     if not chunks: return "⚠️ No text.", render_empty_card(), 0, False, 0, 0, *qmode(), session_state
     difficulty = difficulty if difficulty in DIFFICULTY_CHOICES else "Medium"
     src = get_source_label(selected_docs, session_state)
-    cards = generate_flashcards(chunks=chunks, filename=src, num_cards=int(num_cards), difficulty=difficulty)
-    cards = dedupe_cards(cards)
+    card_result = generate_flashcards_result(chunks=chunks, filename=src, num_cards=int(num_cards), difficulty=difficulty)
+    cards = card_result.get("data", {}).get("cards", [])
+    if not cards:
+        return ("⚠️ Could not generate flashcards.", render_empty_card(), 0, False, 0, 0, *qmode(), session_state)
     session_state["current_flashcards"] = [dict(card) for card in cards]
     session_state["flashcards_master"] = [dict(card) for card in cards]
     session_state["flashcard_wrong_cards"] = []
     session_state["current_flashcard_sources"] = get_source_names(selected_docs, session_state)
     session_state["current_flashcard_source_label"] = src
     session_state["current_flashcard_difficulty"] = difficulty
-    return (f"✅ {len(cards)} {difficulty.lower()} flashcard(s) from: {src}",
+    return (f"✅ {len(cards)} {difficulty.lower()} flashcard(s) from: {src}{generation_status_note(card_result)}",
             render_card_html(cards[0], 0, len(cards), False), 0, False, 0, 0, *qmode(), session_state)
 
 def reveal_answer(session_state, ci, sa, co, wo):
@@ -1071,7 +1189,6 @@ def study_again(session_state):
     if not current_flashcards: return render_empty_card(), 0, False, 0, 0, *qmode(), session_state
     return render_card_html(current_flashcards[0], 0, len(current_flashcards), False), 0, False, 0, 0, *qmode(), session_state
 
-
 def study_wrong_flashcards(session_state):
     session_state = ensure_session_state(session_state)
     wrong_cards = dedupe_cards(session_state.get("flashcard_wrong_cards", []))
@@ -1082,7 +1199,6 @@ def study_wrong_flashcards(session_state):
     return (f"🔁 Reviewing {len(wrong_cards)} missed card(s).",
             render_card_html(session_state["current_flashcards"][0], 0, len(session_state["current_flashcards"]), False),
             0, False, 0, 0, *qmode(), session_state)
-
 
 def study_hard_flashcards(session_state):
     session_state = ensure_session_state(session_state)
@@ -1095,7 +1211,6 @@ def study_hard_flashcards(session_state):
     return (f"🔥 Studying {len(hard_cards)} hard card(s).",
             render_card_html(session_state["current_flashcards"][0], 0, len(session_state["current_flashcards"]), False),
             0, False, 0, 0, *qmode(), session_state)
-
 
 def export_current_flashcards(session_state):
     session_state = ensure_session_state(session_state)
@@ -1126,7 +1241,7 @@ def render_mm_empty():
             '</div>')
 
 def render_mm_loading(step="Building your mindmap…"):
-    return (f'<style>@keyframes rk-spin{{0%{{transform:rotate(0deg)}}100%{{transform:rotate(360deg)}}}}</style>'
+    return (f'<style>@keyframes rk-spin{{from{{transform:rotate(0deg)}}to{{transform:rotate(360deg);}}}}</style>'
             f'<div style="background:#1e293b;border:1px solid #334155;border-radius:16px;min-height:520px;'
             f'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;font-family:\'Segoe UI\',sans-serif;">'
             f'<div style="font-size:42px;animation:rk-spin 3s linear infinite;">🗺️</div>'
@@ -1137,15 +1252,15 @@ def render_mm_loading(step="Building your mindmap…"):
 def make_mindmap_full(session_state, topic, selected_docs):
     session_state = ensure_session_state(session_state)
     if not is_lmstudio_online():
-        yield render_mm_status("🔴 LM Studio is offline. Open LM Studio, load a model, and start the local server.", ok=False), render_mm_empty(), session_state
+        yield render_mm_status("🔴 LM Studio is offline. Open LM Studio, load a model, and start the local server.", ok=False), render_mm_empty(), None, session_state
         return
     selected_docs = sanitize_docs(selected_docs, session_state)
     if not selected_docs:
-        yield render_mm_status("⚠️ No documents selected.", ok=False), render_mm_empty(), session_state
+        yield render_mm_status("⚠️ No documents selected.", ok=False), render_mm_empty(), None, session_state
         return
     chunks = get_chunks_from_selection(selected_docs, session_state)
     if not chunks:
-        yield render_mm_status("⚠️ Selected documents have no text.", ok=False), render_mm_empty(), session_state
+        yield render_mm_status("⚠️ Selected documents have no text.", ok=False), render_mm_empty(), None, session_state
         return
 
     title = topic.strip() if topic.strip() else (
@@ -1154,145 +1269,92 @@ def make_mindmap_full(session_state, topic, selected_docs):
     )
     source = f"{len(selected_docs)} doc(s)" if len(selected_docs) > 1 else get_library(session_state)[selected_docs[0]]["filename"]
 
-    yield render_mm_status("⏳ Generating mindmap…"), render_mm_loading("Generating mindmap…"), session_state
+    yield render_mm_status("⏳ Generating mindmap…"), render_mm_loading("Generating mindmap…"), None, session_state
 
-    md       = generate_mindmap_markdown(topic=topic, chunks=chunks)
-    html_out = mindmap_to_html(md, title=title)
+    mm_result = generate_mindmap_tree_result(topic=topic, chunks=chunks)
+    tree = mm_result.get("data", {}).get("tree", {})
+    html_out = mindmap_to_html(tree, title=title)
+    file_path = save_mindmap_file(tree, title=title)
 
-    yield render_mm_status(f"✅ Mindmap ready · {_html.escape(source)}"), html_out, session_state
+    yield render_mm_status(f"✅ Mindmap ready · {_html.escape(source)}{generation_status_note(mm_result)} · 📂 Download below to open with full controls"), html_out, file_path, session_state
 
 
 # ── CSS ───────────────────────────────────────────────────────────
 css = """
-.gradio-container{max-width:100%!important;width:100%!important;margin:0!important;padding:20px!important;}
-footer{display:none!important;}
-html,body{background:#060b18!important;}
-
-@keyframes rk-dot-bounce{0%,80%,100%{transform:translateY(0);opacity:.4}40%{transform:translateY(-7px);opacity:1}}
-.rk-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#818cf8;margin:0 2px;animation:rk-dot-bounce 1.3s ease-in-out infinite;}
-.rk-dot:nth-child(1){animation-delay:0s}.rk-dot:nth-child(2){animation-delay:.18s}.rk-dot:nth-child(3){animation-delay:.36s}
-.rk-hidden-btn{position:absolute!important;width:1px!important;height:1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;pointer-events:none!important;opacity:0!important;}
-.rk-feat-card:hover{border-color:#4F46E5!important;background:#1a2540!important;}
-
-/* ════════════════════════════════════════════
-   STARTUP SPLASH SCREEN
-   ════════════════════════════════════════════ */
-#rk-splash{
-  position:fixed;inset:0;
-  background:#060b18;
-  z-index:999999;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;
-  font-family:'Segoe UI',sans-serif;
+html, body {
+  background: #060b18 !important;
+  font-family: 'Segoe UI', system-ui, sans-serif;
 }
-#rk-splash.rk-splash-out{
-  animation:rk-splash-dismiss .75s ease forwards;
+.gradio-container {
+  max-width: 100% !important;
+  width: 100% !important;
+  margin: 0 !important;
+  padding: 16px 24px 40px !important;
+  background: transparent !important;
 }
-@keyframes rk-splash-dismiss{
-  0%  {opacity:1;transform:scale(1)}
-  60% {opacity:0;transform:scale(1.03)}
-  100%{opacity:0;pointer-events:none}
+footer { display: none !important; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0f172a; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #4F46E5; }
+#rk-app-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 20px; background: #0d1117;
+  border: 1px solid #1e293b; border-radius: 14px; margin-bottom: 18px;
 }
-#rk-spinner{position:relative;width:72px;height:72px;}
-#rk-spinner .rk-tick{
-  position:absolute;top:50%;left:50%;
-  width:7px;height:19px;
-  margin-left:-3.5px;
-  border-radius:4px;
-  transform-origin:center 38px;
-  animation:rk-tick-fade 1.2s linear infinite;
+#rk-app-header .rk-logo { font-size: 28px; line-height: 1; }
+#rk-app-header .rk-title { font-size: 19px; font-weight: 800; color: #f1f5f9; letter-spacing: -0.3px; }
+#rk-app-header .rk-subtitle { font-size: 12px; color: #475569; margin-top: 1px; }
+#rk-app-header .rk-spacer { flex: 1; }
+#rk-app-header .rk-badge {
+  background: #1e293b; border: 1px solid #334155;
+  color: #818cf8; font-size: 11px; font-weight: 700; letter-spacing: 1.2px;
+  padding: 4px 12px; border-radius: 20px; text-transform: uppercase;
 }
-#rk-spinner .rk-tick:nth-child(1) {transform:rotate(0deg)   translateY(-38px);animation-delay:-1.10s}
-#rk-spinner .rk-tick:nth-child(2) {transform:rotate(30deg)  translateY(-38px);animation-delay:-1.00s}
-#rk-spinner .rk-tick:nth-child(3) {transform:rotate(60deg)  translateY(-38px);animation-delay:-0.90s}
-#rk-spinner .rk-tick:nth-child(4) {transform:rotate(90deg)  translateY(-38px);animation-delay:-0.80s}
-#rk-spinner .rk-tick:nth-child(5) {transform:rotate(120deg) translateY(-38px);animation-delay:-0.70s}
-#rk-spinner .rk-tick:nth-child(6) {transform:rotate(150deg) translateY(-38px);animation-delay:-0.60s}
-#rk-spinner .rk-tick:nth-child(7) {transform:rotate(180deg) translateY(-38px);animation-delay:-0.50s}
-#rk-spinner .rk-tick:nth-child(8) {transform:rotate(210deg) translateY(-38px);animation-delay:-0.40s}
-#rk-spinner .rk-tick:nth-child(9) {transform:rotate(240deg) translateY(-38px);animation-delay:-0.30s}
-#rk-spinner .rk-tick:nth-child(10){transform:rotate(270deg) translateY(-38px);animation-delay:-0.20s}
-#rk-spinner .rk-tick:nth-child(11){transform:rotate(300deg) translateY(-38px);animation-delay:-0.10s}
-#rk-spinner .rk-tick:nth-child(12){transform:rotate(330deg) translateY(-38px);animation-delay: 0.00s}
-@keyframes rk-tick-fade{
-  0%  {background:#a5b4fc;box-shadow:0 0 8px #4F46E5;opacity:1  }
-  40% {background:#1e1b4b;box-shadow:none;           opacity:0.12}
-  100%{background:#a5b4fc;box-shadow:0 0 8px #4F46E5;opacity:1  }
+.tabs > .tab-nav {
+  background: #0d1117 !important; border-bottom: 1px solid #1e293b !important;
+  border-radius: 12px 12px 0 0 !important; padding: 4px 8px 0 !important; gap: 2px !important;
 }
-#rk-splash-text{
-  font-size:15px;font-weight:600;
-  color:#64748b;letter-spacing:1.5px;
-  min-width:140px;text-align:center;
+.tabs > .tab-nav > button {
+  background: transparent !important; border: none !important;
+  border-bottom: 2px solid transparent !important; color: #475569 !important;
+  font-size: 13px !important; font-weight: 600 !important;
+  padding: 10px 16px !important; border-radius: 8px 8px 0 0 !important;
+  transition: color 0.15s, border-color 0.15s, background 0.15s !important; cursor: pointer !important;
 }
-#rk-splash-bar-wrap{display:flex;gap:5px;align-items:center;}
-.rk-seg{
-  width:24px;height:11px;border-radius:3px;
-  background:#0f172a;border:1px solid #1e293b;
-  transition:background .12s ease,box-shadow .12s ease;
+.tabs > .tab-nav > button:hover { color: #94a3b8 !important; background: #1e293b44 !important; }
+.tabs > .tab-nav > button.selected {
+  color: #a5b4fc !important; border-bottom-color: #4F46E5 !important; background: #1e293b66 !important;
 }
-.rk-seg.on{
-  background:#4F46E5;border-color:#6366f1;
-  box-shadow:0 0 10px #4F46E5cc;
+.tabitem {
+  background: #0d1117 !important; border: 1px solid #1e293b !important;
+  border-top: none !important; border-radius: 0 0 12px 12px !important; padding: 20px !important;
 }
-"""
-
-SPLASH_JS = """
-() => {
-  var splash = document.createElement('div');
-  splash.id = 'rk-splash';
-  splash.innerHTML =
-    '<div id="rk-spinner"></div>' +
-    '<div id="rk-splash-text">Loading AI engine.</div>' +
-    '<div id="rk-splash-bar-wrap">' +
-    '<div class="rk-seg"></div><div class="rk-seg"></div>' +
-    '<div class="rk-seg"></div><div class="rk-seg"></div>' +
-    '<div class="rk-seg"></div><div class="rk-seg"></div>' +
-    '<div class="rk-seg"></div><div class="rk-seg"></div>' +
-    '<div class="rk-seg"></div><div class="rk-seg"></div>' +
-    '</div>';
-  document.body.insertBefore(splash, document.body.firstChild);
-  var spinner = document.getElementById('rk-spinner');
-  for (var i = 0; i < 12; i++) {
-    var t = document.createElement('div'); t.className = 'rk-tick'; spinner.appendChild(t);
-  }
-  var segs = splash.querySelectorAll('.rk-seg');
-  var segIdx = 0;
-  var barTimer = setInterval(function() {
-    segs.forEach(function(s){ s.classList.remove('on'); });
-    for (var k = 0; k <= segIdx; k++) segs[k].classList.add('on');
-    segIdx++; if (segIdx >= segs.length) segIdx = 0;
-  }, 150);
-  var textEl = document.getElementById('rk-splash-text');
-  var dots = 1;
-  var msgs = ['Loading AI engine', 'Warming up embeddings', 'Almost ready'];
-  var mi = 0;
-  var dotTimer = setInterval(function() {
-    dots = (dots % 6) + 1;
-    if (textEl) textEl.textContent = msgs[mi] + '.'.repeat(dots);
-  }, 220);
-  setInterval(function(){ mi = (mi+1) % msgs.length; }, 2200);
-  var gone = false;
-  function dismiss() {
-    if (gone) return; gone = true;
-    clearInterval(barTimer); clearInterval(dotTimer);
-    if (textEl) textEl.textContent = 'Ready!';
-    segs.forEach(function(s){ s.classList.add('on'); });
-    setTimeout(function() {
-      splash.classList.add('rk-splash-out');
-      setTimeout(function() { if (splash.parentNode) splash.parentNode.removeChild(splash); }, 800);
-    }, 350);
-  }
-  var fallback = setTimeout(function(){ dismiss(); }, 60000);
-  function watchSignal() {
-    var el = document.querySelector('#rk-model-signal textarea');
-    if (!el) { setTimeout(watchSignal, 300); return; }
-    if (el.value === 'ready') { clearTimeout(fallback); dismiss(); return; }
-    var poll = setInterval(function() {
-      if (el.value === 'ready') { clearInterval(poll); clearTimeout(fallback); dismiss(); }
-    }, 250);
-  }
-  watchSignal();
+input[type="range"] { accent-color: #4F46E5 !important; }
+input[type="checkbox"], input[type="radio"] { accent-color: #4F46E5 !important; }
+#rk_chat_display {
+  max-height: 480px; overflow-y: auto; padding-right: 4px;
+  scrollbar-width: thin; scrollbar-color: #334155 #0f172a;
+}
+@keyframes rk-dot-bounce {
+  0%,80%,100% { transform: translateY(0); opacity: .4; }
+  40%          { transform: translateY(-7px); opacity: 1; }
+}
+.rk-dot {
+  display: inline-block; width: 7px; height: 7px;
+  border-radius: 50%; background: #818cf8; margin: 0 2px;
+  animation: rk-dot-bounce 1.3s ease-in-out infinite;
+}
+.rk-dot:nth-child(1) { animation-delay: 0s; }
+.rk-dot:nth-child(2) { animation-delay: .18s; }
+.rk-dot:nth-child(3) { animation-delay: .36s; }
+.rk-hidden-btn {
+  position: absolute !important; width: 1px !important; height: 1px !important;
+  overflow: hidden !important; clip: rect(0,0,0,0) !important;
+  white-space: nowrap !important; pointer-events: none !important; opacity: 0 !important;
 }
 """
+
 
 EMPTY_SESSION = {
     "session_id": "preview",
@@ -1304,50 +1366,40 @@ EMPTY_SESSION = {
 }
 
 
-def model_ready_signal(previous_session):
-    previous_session = ensure_session_state(previous_session) if previous_session else None
-    if previous_session:
-        drop_session(previous_session["session_id"])
-    while not is_model_ready():
-        time.sleep(0.3)
-    session_state = new_session_state()
-    saved_library, active_doc_id = load_library_snapshot()
-    for doc_id, info in saved_library.items():
-        try:
-            index_chunks(
-                info.get("chunks", []),
-                doc_id=doc_id,
-                filename=info.get("filename", doc_id),
-                session_id=session_state["session_id"],
-            )
-            session_state["library"][doc_id] = info
-        except Exception as exc:
-            print(f"⚠️ Could not restore '{info.get('filename', doc_id)}': {exc}")
-    if active_doc_id in session_state["library"]:
-        session_state["active_doc_id"] = active_doc_id
-    elif session_state["library"]:
-        session_state["active_doc_id"] = next(iter(session_state["library"]))
-    return "ready", session_state
-
 # ── UI ────────────────────────────────────────────────────────────
+_COMBINED_CSS = css + "\n" + _SPLASH_CSS
+
 with gr.Blocks(title="🧠 RK StudyMind") as demo:
-    model_signal = gr.Textbox(value="", visible=False, elem_id="rk-model-signal", interactive=False)
     session_state = gr.State(None)
 
-    gr.Markdown("# 🧠 RK StudyMind")
-    gr.Markdown("### Your Personal AI Study Companion")
+    gr.HTML("""
+<div id="rk-app-header">
+  <div class="rk-logo">🧠</div>
+  <div>
+    <div class="rk-title">RK StudyMind</div>
+    <div class="rk-subtitle">Your personal study companion</div>
+  </div>
+  <div class="rk-spacer"></div>
+  <div class="rk-badge">v1.2</div>
+</div>
+""")
 
     with gr.Tabs():
 
         # 0: Home
         with gr.Tab("🏠 Home"):
             home_html = gr.HTML(value=render_home_stats(EMPTY_SESSION))
-            gr.Button("🔄 Refresh Stats & Check AI", variant="primary", size="lg").click(
-                fn=refresh_home, inputs=[session_state], outputs=[home_html, session_state])
+
+            gr.HTML('<div style="border-top:1px solid #1e293b;margin:16px 0;"></div>')
+            gr.HTML('<div style="font-size:11px;font-weight:700;color:#475569;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:10px;">🤖 AI Engine</div>')
+            engine_status_html = gr.HTML(value=render_engine_status_html())
+
+            gr.HTML('<div style="border-top:1px solid #1e293b;margin:16px 0;"></div>')
+            refresh_home_btn = gr.Button("🔄 Refresh Stats & Check AI", variant="primary", size="lg")
 
         # 1: Library
         with gr.Tab("📚 Library"):
-            gr.Markdown("_Supported formats: PDF · DOCX · TXT · MD · PPTX · EPUB. All feature tabs update automatically._")
+            gr.HTML('<div style="background:#0f172a;border:1px solid #1e293b;border-left:3px solid #4F46E5;border-radius:8px;padding:10px 16px;font-size:12.5px;color:#64748b;margin-bottom:4px;">📎 Supported: <strong style="color:#94a3b8;">PDF · DOCX · TXT · MD · PPTX · EPUB</strong> &nbsp;·&nbsp; Max 25 MB per file &nbsp;·&nbsp; All tabs update automatically after upload.</div>')
             with gr.Row():
                 file_input = gr.File(label="Upload PDF, DOCX, TXT, MD, PPTX or EPUB", file_types=[".pdf",".docx",".txt",".md",".pptx",".epub"], file_count="multiple")
                 upload_btn = gr.Button("Add to Library 📚", variant="primary", scale=0)
@@ -1386,7 +1438,6 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
                 start_quiz_btn  = gr.Button("Generate Quiz 📝", variant="primary", scale=2)
             quiz_status   = gr.Textbox(label="Status", interactive=False, lines=1)
             quiz_html_out = gr.HTML(value=render_quiz_empty())
-            # Hidden buttons — triggered by JS inside the quiz card
             q_idx = gr.State(0); sel_ans = gr.State(None); rev_ans = gr.State(False); sc_ans = gr.State(0)
             with gr.Row(elem_classes=["rk-hidden-btn"]):
                 btn_a = gr.Button("A", elem_id="rk_quiz_btn_a")
@@ -1396,7 +1447,6 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
                 sub_btn = gr.Button("Submit", elem_id="rk_quiz_submit")
                 nxt_btn = gr.Button("Next",   elem_id="rk_quiz_next")
                 rst_btn = gr.Button("Restart",elem_id="rk_quiz_restart")
-            # Post-quiz actions — collapsed by default
             with gr.Accordion("📋 After Quiz", open=False):
                 with gr.Row():
                     retry_wrong_btn  = gr.Button("🔁 Retry Wrong Answers", variant="secondary")
@@ -1431,17 +1481,16 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
             card_html_display = gr.HTML(value=render_empty_card())
             card_idx=gr.State(0); show_ans=gr.State(False); correct_st=gr.State(0); wrong_st=gr.State(0)
             with gr.Row():
-                prev_btn        = gr.Button("⬅️ Prev",      variant="secondary", interactive=True,  scale=1)
-                reveal_btn      = gr.Button("🔄 Reveal",    variant="primary",   interactive=True,  scale=2)
-                correct_btn     = gr.Button("✅ Got It",     variant="secondary", interactive=False, scale=1)
-                wrong_btn_fc    = gr.Button("❌ Missed",     variant="secondary", interactive=False, scale=1)
-                study_again_btn = gr.Button("🔁 Again",      variant="secondary", interactive=False, scale=1)
-            # Extra card actions — collapsed by default
+                prev_btn        = gr.Button("⬅️ Prev",   variant="secondary", interactive=True,  scale=1)
+                reveal_btn      = gr.Button("🔄 Reveal", variant="primary",   interactive=True,  scale=2)
+                correct_btn     = gr.Button("✅ Got It",  variant="secondary", interactive=False, scale=1)
+                wrong_btn_fc    = gr.Button("❌ Missed",  variant="secondary", interactive=False, scale=1)
+                study_again_btn = gr.Button("🔁 Again",   variant="secondary", interactive=False, scale=1)
             with gr.Accordion("📋 More Options", open=False):
                 with gr.Row():
-                    study_wrong_btn  = gr.Button("📚 Study Missed Cards",  variant="secondary")
-                    hard_cards_btn   = gr.Button("🔥 Hard Cards Only",      variant="secondary")
-                    export_cards_btn = gr.Button("📤 Export CSV (Anki)",    variant="secondary")
+                    study_wrong_btn  = gr.Button("📚 Study Missed Cards", variant="secondary")
+                    hard_cards_btn   = gr.Button("🔥 Hard Cards Only",     variant="secondary")
+                    export_cards_btn = gr.Button("📤 Export CSV (Anki)",   variant="secondary")
                 fc_export_file = gr.File(label="Flashcards CSV", interactive=False)
             card_outs = [card_html_display,card_idx,show_ans,correct_st,wrong_st,
                          prev_btn,reveal_btn,correct_btn,wrong_btn_fc,study_again_btn,session_state]
@@ -1463,18 +1512,27 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
 
         # 5: Mindmap
         with gr.Tab("🗺️ Mindmap"):
-            gr.Markdown("_Generates a concept tree. Scroll to zoom · Drag to pan · Reset/+/− buttons in the map._")
+            gr.HTML('<div style="background:#0f172a;border:1px solid #1e293b;border-left:3px solid #4F46E5;border-radius:8px;padding:10px 16px;font-size:12.5px;color:#64748b;margin-bottom:8px;">🗺️ Generates a structured study tree from your selected documents. &nbsp;<strong style="color:#94a3b8;">Expand</strong>, <strong style="color:#94a3b8;">collapse</strong>, fit, zoom, or export from the tree toolbar.</div>')
             mm_doc_selector = gr.CheckboxGroup(label="📄 Select Documents for Mindmap", choices=[], value=[], interactive=True)
             with gr.Row():
                 topic_input     = gr.Textbox(label="Topic (optional)", placeholder="Leave blank to auto-detect", lines=1, scale=3)
                 mm_generate_btn = gr.Button("Generate Mindmap 🗺️", variant="primary", scale=0)
             mm_status_html = gr.HTML("")
             mm_display     = gr.HTML(value=render_mm_empty())
+            with gr.Accordion("📂 Open in Browser (recommended for full controls)", open=True):
+                gr.HTML('<div style="font-size:12px;color:#64748b;margin-bottom:6px;">Download the .html file below to open the same structured tree in your browser.</div>')
+                mm_file_out = gr.File(label="Mindmap HTML File", interactive=False)
             mm_generate_btn.click(fn=make_mindmap_full,
                 inputs=[session_state, topic_input, mm_doc_selector],
-                outputs=[mm_status_html, mm_display, session_state])
+                outputs=[mm_status_html, mm_display, mm_file_out, session_state])
 
-    # ── Library → sync selectors ──────────────────────────────────
+    # ── Wiring ────────────────────────────────────────────────────
+    refresh_home_btn.click(
+        fn=refresh_home,
+        inputs=[session_state],
+        outputs=[home_html, engine_status_html, session_state],
+    )
+
     lib_sync = [library_html, lib_doc_status, doc_selector,
                 quiz_doc_selector, fc_selector, mm_doc_selector, qa_status_html, session_state]
 
@@ -1485,8 +1543,7 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
     remove_btn.click(fn=delete_doc,            inputs=[session_state, doc_selector], outputs=lib_sync)
     refresh_btn.click(fn=refresh_library,      inputs=[session_state],               outputs=lib_sync)
 
-    demo.load(fn=model_ready_signal, inputs=[session_state], outputs=[model_signal, session_state])
 
 if __name__ == "__main__":
     demo.queue()
-    demo.launch(inbrowser=True, theme=gr.themes.Soft(), css=css, js=SPLASH_JS)
+    demo.launch(inbrowser=True, theme=gr.themes.Soft(), css=_COMBINED_CSS, js=_SPLASH_JS)

@@ -14,33 +14,81 @@ def _has_meaningful_text(text: str, threshold: int = 24) -> bool:
     return len(re.sub(r"\s+", "", text or "")) >= threshold
 
 
+# ── Tesseract auto-detection ─────────────────────────────────────────────────
+_TESSERACT_CONFIGURED = False
+
+def _setup_tesseract() -> bool:
+    """
+    Tries to locate the Tesseract executable.
+    On Windows, checks common install paths if `tesseract` is not on PATH.
+    Returns True if Tesseract is available, False otherwise.
+    """
+    global _TESSERACT_CONFIGURED
+    try:
+        import pytesseract
+        import shutil
+        import sys
+
+        if sys.platform == "win32" and not shutil.which("tesseract"):
+            candidate_paths = [
+                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+                os.path.expanduser(r"~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"),
+                os.path.expanduser(r"~\AppData\Local\Tesseract-OCR\tesseract.exe"),
+            ]
+            for path in candidate_paths:
+                if os.path.isfile(path):
+                    pytesseract.pytesseract.tesseract_cmd = path
+                    print(f"[OCR] Tesseract found at: {path}")
+                    break
+
+        pytesseract.get_tesseract_version()
+        _TESSERACT_CONFIGURED = True
+        return True
+    except Exception:
+        return False
+
+
 def _ocr_page(page) -> str:
+    """Renders a PDF page to an image and runs OCR on it."""
     try:
         import io
-        from PIL import Image
+        from PIL import Image, ImageEnhance, ImageFilter
         import pytesseract
     except ImportError:
         return ""
 
+    if not _setup_tesseract():
+        return ""
+
     try:
-        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-        image = Image.open(io.BytesIO(pix.tobytes("png")))
-        text = pytesseract.image_to_string(image)
+        # 3x scale = ~216 DPI — good balance of speed vs accuracy for A4 lecture slides
+        pix    = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
+        image  = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")  # grayscale
+
+        # Mild sharpening and contrast boost helps Tesseract on low-quality scans
+        image  = ImageEnhance.Contrast(image).enhance(1.4)
+        image  = image.filter(ImageFilter.SHARPEN)
+
+        # --oem 3 = best LSTM engine; --psm 6 = assume uniform block of text
+        config = "--oem 3 --psm 6"
+        text   = pytesseract.image_to_string(image, config=config)
         return text.strip()
     except pytesseract.pytesseract.TesseractNotFoundError:
         return ""
-    except Exception:
+    except Exception as e:
+        print(f"[OCR] Page error: {e}")
         return ""
 
 
 def _missing_ocr_dependencies() -> bool:
+    """Returns True if OCR cannot run (missing packages or Tesseract executable)."""
     try:
-        import pytesseract
-        from PIL import Image  # noqa: F401
-        _ = pytesseract.get_tesseract_version()
-        return False
-    except Exception:
+        from PIL import Image   # noqa: F401
+        import pytesseract      # noqa: F401
+    except ImportError:
         return True
+    return not _setup_tesseract()
 
 
 def read_file(file_path: str) -> str:
@@ -90,8 +138,14 @@ def read_pdf(file_path: str) -> str:
             return full_text
         if _missing_ocr_dependencies():
             return (
-                "⚠️ This PDF appears to be scanned or image-based. OCR support is not available. "
-                "Install Pillow, pytesseract, and the Tesseract OCR app to extract scanned PDFs."
+                "⚠️ This PDF is scanned/image-based and requires Tesseract OCR.\n\n"
+                "To fix this:\n"
+                "  1. Download Tesseract: https://github.com/UB-Mannheim/tesseract/wiki\n"
+                "     → Install the Windows .exe (choose \'Add to PATH\' during install)\n"
+                "  2. In your venv, run: pip install pytesseract Pillow\n"
+                "  3. Restart the app — OCR will work automatically\n\n"
+                "If Tesseract is already installed but not on PATH, the app will\n"
+                "auto-detect it at C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
             )
         if used_ocr:
             return full_text
@@ -338,12 +392,21 @@ def get_page_label(file_path: str) -> str:
 # Chunker (unchanged)
 # -----------------------------------------------
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50,
+               chunk_size_tokens: int = None) -> list:
     """
     Splits large text into smaller overlapping chunks.
-    chunk_size = words per chunk
-    overlap    = shared words between consecutive chunks
+
+    Args:
+        text              : raw document text
+        chunk_size        : words per chunk (legacy, used when chunk_size_tokens is None)
+        overlap           : shared words between consecutive chunks
+        chunk_size_tokens : if provided, overrides chunk_size.
+                            Converts token budget → word count (1 token ≈ 0.75 words).
     """
+    if chunk_size_tokens is not None:
+        # 1 token ≈ 0.75 words on average
+        chunk_size = max(50, int(chunk_size_tokens / 1.33))
     if chunk_size <= 0:
         return []
     if overlap < 0:

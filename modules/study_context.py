@@ -19,12 +19,22 @@ def _evenly_spaced_indices(length: int, count: int) -> list[int]:
     return indices
 
 
-def build_balanced_context(chunks: list[str] | None, max_words: int = 4500,
+def build_balanced_context(chunks: list[str] | None, max_words: int = None,
                            target_chunks: int = 10) -> str:
     """
     Build a prompt context that covers the beginning, middle, and end of a
     document set instead of blindly taking the first N words.
+
+    If max_words is None, the adaptive strategy is queried for the detected
+    model's safe context window; falls back to 4 200 words if unavailable.
     """
+    if max_words is None:
+        try:
+            from modules.adaptive_chunking import adaptive_strategy
+            max_words = adaptive_strategy.detect_model()["context_max_words"]
+        except Exception:
+            max_words = 4200
+
     cleaned = _clean_chunks(chunks)
     if not cleaned or max_words <= 0:
         return ""

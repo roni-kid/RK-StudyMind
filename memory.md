@@ -21,7 +21,7 @@
 - Avoid visual clutter — no stacking too many buttons in a row, no visible empty widgets.
 - The app should feel calm and focused, not overwhelming.
 
-### Theme
+### Dark Theme
 | Property | Value |
 |---|---|
 | Background | `#060b18` (near-black) |
@@ -90,13 +90,58 @@ All features must be preserved. Simplification only affects **where** things app
 
 ---
 
+## 🔢 Math Rendering Strategy
+
+> "Translate fractions, equations and expressions from the LLM response so the LLM has less burden."
+
+The Q&A pipeline applies **two passes** inside `format_ai_message()` in `app.py`:
+
+| Pass | Function | What it handles |
+|---|---|---|
+| 1 | `render_math_html()` | Explicit LaTeX: `$x^2$`, `\[...\]`, `\(...\)`, `\frac{}{}`, `\lambda` |
+| 2 | `render_plain_math_html()` | Plain-text math the LLM writes naturally — no delimiters needed |
+
+### Pass 2 — patterns handled
+
+| LLM writes | Renders as |
+|---|---|
+| `x^2`, `r^3`, `10^-4` | x², r³, 10⁻⁴ (unicode superscripts) |
+| `v_0`, `CO_2` | v₀, CO₂ (unicode subscripts) |
+| `sqrt(b^2 - 4ac)` | √(b² - 4ac) |
+| `1/2`, `3/4`, `2/3`, `1/8` | ½, ¾, ⅔, ⅛ (unicode fraction chars) |
+| `>=`, `<=`, `!=`, `~=` | ≥, ≤, ≠, ≈ |
+| `->`, `<->`, `=>`, `<-` | →, ↔, ⇒, ← |
+| `+-`, `+/-` | ± |
+| `45 deg`, `180 degrees` | 45°, 180° |
+| `3 x 4` (digits flanking x) | 3×4 |
+| `theta`, `pi`, `lambda`, `sigma` ... | θ, π, λ, σ ... (math context only) |
+| `infinity`, `inf` | ∞ (math context only) |
+
+### LLM system prompt (ai_engine.py)
+`QA_SYSTEM_PROMPT` now instructs the LLM to:
+- Write math naturally: `x^2`, `sqrt(x)`, `1/2`, `>=`, `->`, spell out Greek letter names
+- **NOT** use LaTeX dollar signs or backslash commands
+
+### Processing order inside render_plain_math_html
+1. Unicode fractions (`1/2` → ½)
+2. `sqrt(...)` — runs **before** powers so inner args are clean
+3. Powers / superscripts (`x^2` → x²)
+4. Subscripts (`v_0` → v₀)
+5. Comparison & logic operators (`>=` → ≥, `->` → →)
+6. Degree symbol (`45 deg` → 45°)
+7. Multiplication sign (`3 x 4` → 3×4)
+8. Named constants in math context (`pi` → π)
+
+---
+
 ## 🏗️ Architecture Notes
 
 - **Session state** is a `gr.State(dict)` — all library, chat, quiz, and flashcard data lives in it per browser session.
 - **No global mutable state** for user data — all functions take `session_state` as first arg.
 - **LM Studio** is the AI backend (local server, port 1234). Check `is_lmstudio_online()` before any AI call.
-- **Embedding model** (`all-MiniLM-L6-v2`) loads in background at startup. Splash screen waits for it via `#rk-model-signal` polling.
+- **Embedding model** (`all-MiniLM-L6-v2`) loads in background at startup via `preload_model_background()`.
 - **ChromaDB** is used for per-session semantic vector search. Sessions are cleaned up on new page load.
+- **No splash screen** — the app opens directly. The embedding model loads silently in the background.
 
 ---
 
@@ -126,9 +171,21 @@ Full history in `CHANGELOG.md`. Summary of current version:
 | Version | Status | Key Features |
 |---|---|---|
 | v1.0 | ✅ Done | PDF+DOCX library, RAG Q&A, Quiz, Flashcards, Mindmap |
-| v1.1 | 🔄 In Progress | Chat UI upgrade, 6 file formats, difficulty levels, session state, splash screen, export, analytics |
-| v1.2 | 📋 Planned | Loading screen improvements, NotebookLM-style look |
+| v1.1 | 🔄 In Progress | Chat UI, 6 file formats, difficulty levels, session state, export, analytics, plain-text math, dark-only, adaptive chunking |
+| v1.2 | 📋 Planned | NotebookLM-style look |
 
 ---
 
-*Last updated: 2026-04-09*
+## ❌ Removed Features
+
+These were explicitly removed — do NOT re-add unless the user asks:
+
+| Feature | Why removed |
+|---|---|
+| 🎤 Speech-to-Text (Speak button) | Broken — Gradio 5/6 iframe sandboxing blocked `onclick` from reaching top-window JS |
+| ☀️ Light Theme toggle | Removed per user request — app is dark-only |
+| 👻 Splash Screen | Removed per user request — app opens directly |
+
+---
+
+*Last updated: 2026-05-08*
