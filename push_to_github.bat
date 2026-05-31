@@ -18,41 +18,32 @@ echo.
 cd /d "C:\Users\rocks\Documents\CLaude\StudyMind"
 if errorlevel 1 (
     echo [ERROR] Could not find project directory.
-    echo         Expected: C:\Users\rocks\Documents\CLaude\StudyMind
     pause
     exit /b 1
 )
 
-:: Show current git status so you know what's changing
+:: Show current git status
 echo  --- Current Git Status ---
 git status --short
 echo.
-
-:: Check if there's anything to commit
-git diff --quiet HEAD >nul 2>&1
-if errorlevel 0 (
-    git diff --cached --quiet >nul 2>&1
-    if errorlevel 0 (
-        git status --porcelain >nul 2>&1
-    )
-)
 
 :: Stage all changes
 echo  Staging all changes...
 git add .
 echo.
 
-:: Check staged diff — if nothing staged, warn and exit
+:: Check if anything is staged after git add
 git diff --cached --quiet
 if not errorlevel 1 (
-    echo  [INFO] Nothing new to commit. Working tree is clean.
-    echo.
-    echo  If you expected changes, check that your files saved correctly.
+    echo  Nothing to commit. Working tree is clean.
+    echo  Type p to push anyway, or press Enter to exit.
+    set /p push_anyway="  Choice: "
+    if /i "!push_anyway!"=="p" goto :do_push
     pause
     exit /b 0
 )
 
-:: Commit message — auto-default if left blank
+:: Commit
 set "default_msg=Update RK StudyMind v1.3"
 set /p msg="  Commit message (Enter for default): "
 if "!msg!"=="" set "msg=!default_msg!"
@@ -60,14 +51,15 @@ if "!msg!"=="" set "msg=!default_msg!"
 git commit -m "!msg!"
 if errorlevel 1 (
     echo.
-    echo  [ERROR] Commit failed. Check git output above.
+    echo  [ERROR] Commit failed.
     pause
     exit /b 1
 )
 
-:: Push — normal or force
+:do_push
 echo.
-set /p force_flag="  Force push? (f = force, Enter = normal): "
+echo  Type f for force push, or press Enter for normal push.
+set /p force_flag="  Choice: "
 if /i "!force_flag!"=="f" (
     echo  Force pushing to origin/main...
     git push --force origin main
@@ -78,8 +70,7 @@ if /i "!force_flag!"=="f" (
 
 if errorlevel 1 (
     echo.
-    echo  [ERROR] Push failed.
-    echo  If remote has diverged, re-run and type 'f' to force push.
+    echo  [ERROR] Push failed. Re-run and choose f to force push.
 ) else (
     echo.
     echo  =====================================================
