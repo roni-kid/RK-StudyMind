@@ -75,7 +75,7 @@ MINDMAP_SYSTEM_PROMPT = (
 
 
 def ask_lmstudio(prompt: str, context: str = "", system_prompt: str = "",
-                 temperature: float = 0.7) -> str:
+                 temperature: float = 0.7, max_tokens: int = 1024) -> str:
     """
     Sends a question + context to your local LM Studio model.
     Returns the model's answer as a string.
@@ -114,7 +114,7 @@ def ask_lmstudio(prompt: str, context: str = "", system_prompt: str = "",
         "model": "local-model",
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": 1024,
+        "max_tokens": max_tokens,
         "stream": False,
     }
 

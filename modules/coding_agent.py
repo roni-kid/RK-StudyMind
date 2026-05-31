@@ -1,6 +1,6 @@
 """
-Coding Agent — StudyMind v1.3
-Four modes: Explain, Q&A, Tutor, Agent.
+Coding — StudyMind v1.3
+Two modes: Explain and Ask AI.
 Powered by local LM Studio. Smart truncation adapts to loaded model context window.
 """
 import json, re, html as _html
@@ -27,14 +27,35 @@ def smart_truncate(code: str, max_tokens: int = 2048) -> tuple:
     budget = max(512, max_tokens - 800)
     if _tokens(code) <= budget:
         return code, False
-    lines = code.split("\n")
-    keep = int(budget * 0.8)
-    top_n = keep // 2
-    bot_n = keep - top_n
-    top = "\n".join(lines[:top_n])
-    bot = "\n".join(lines[-bot_n:]) if bot_n > 0 else ""
-    mid_count = len(lines) - top_n - bot_n
-    summary = f"\n\n# ── [{mid_count} lines condensed by StudyMind smart truncation] ──\n\n"
+    lines = code.splitlines()
+    summary_budget = 80
+    keep_budget = max(200, budget - summary_budget)
+    top_budget = keep_budget // 2
+    bottom_budget = keep_budget - top_budget
+
+    top_lines = []
+    used = 0
+    for line in lines:
+        line_cost = _tokens(line + "\n")
+        if top_lines and used + line_cost > top_budget:
+            break
+        top_lines.append(line)
+        used += line_cost
+
+    bottom_lines = []
+    used = 0
+    for line in reversed(lines[len(top_lines):]):
+        line_cost = _tokens(line + "\n")
+        if bottom_lines and used + line_cost > bottom_budget:
+            break
+        bottom_lines.append(line)
+        used += line_cost
+    bottom_lines.reverse()
+
+    mid_count = max(0, len(lines) - len(top_lines) - len(bottom_lines))
+    top = "\n".join(top_lines)
+    bot = "\n".join(bottom_lines)
+    summary = f"\n\n# [StudyMind smart truncation: {mid_count} middle lines condensed]\n\n"
     return top + summary + bot, True
 
 
@@ -89,8 +110,8 @@ def render_explain_html(result: dict, filename: str = "") -> str:
             f'{body}</div>'
         )
 
-    def prose(text):
-        return f'<div style="font-size:13.5px;color:#e2e8f0;line-height:1.75;">{_html.escape(str(text))}</div>'
+    def prose(text, font_size="13.5px"):
+        return f'<div style="font-size:{font_size};color:#e2e8f0;line-height:1.75;">{_html.escape(str(text))}</div>'
 
     def card_list(items, empty="None found."):
         if not items:
@@ -136,7 +157,7 @@ def render_explain_html(result: dict, filename: str = "") -> str:
 
     return (
         f'<div style="font-family:\'Segoe UI\',sans-serif;padding:4px 0;">{banner}{hdr}'
-        + section("01", "Summary",         prose(data.get("summary","No summary.")), "#818cf8")
+        + section("01", "Summary",         prose(data.get("summary","No summary."), "13px"), "#818cf8")
         + section("02", "Functions",       fn_list(data.get("functions",[])),        "#d2a8ff")
         + section("03", "Classes",         cls_list(data.get("classes",[])),          "#ffa657")
         + section("04", "Logic Flow",      prose(data.get("logic_flow","—")),        "#34d399")
@@ -146,7 +167,7 @@ def render_explain_html(result: dict, filename: str = "") -> str:
     )
 
 
-# ── Q&A Mode ──────────────────────────────────────────────────────────────────
+# ── Ask AI Mode ───────────────────────────────────────────────────────────────
 
 _QA_SYSTEM = (
     "You are a code assistant helping a student understand their source code. "
@@ -177,16 +198,19 @@ def render_qa_history_html(history: list) -> str:
     html = '<div style="font-family:\'Segoe UI\',sans-serif;max-height:380px;overflow-y:auto;padding:4px;scrollbar-width:thin;scrollbar-color:#334155 #0f172a;">'
     for q, a in history:
         safe_q = _html.escape(q).replace("\n", "<br>")
-        safe_a = _html.escape(a).replace("\n", "<br>")
-        safe_a = re.sub(
-            r'```(?:\w+)?\n?(.*?)```',
-            lambda m: (
+        parts = []
+        pos = 0
+        for match in re.finditer(r'```(?:\w+)?\n?(.*?)```', a, flags=re.DOTALL):
+            if match.start() > pos:
+                parts.append(_html.escape(a[pos:match.start()]).replace("\n", "<br>"))
+            parts.append(
                 f'<pre style="background:#0d1117;border:1px solid #30363d;border-radius:8px;'
                 f'padding:10px;font-size:12px;color:#c9d1d9;overflow-x:auto;margin:6px 0;">'
-                f'<code>{_html.escape(m.group(1))}</code></pre>'
-            ),
-            a, flags=re.DOTALL
-        )
+                f'<code>{_html.escape(match.group(1))}</code></pre>'
+            )
+            pos = match.end()
+        parts.append(_html.escape(a[pos:]).replace("\n", "<br>"))
+        safe_a = "".join(parts)
         html += (
             f'<div style="text-align:right;margin-bottom:10px;">'
             f'<div style="display:inline-block;background:linear-gradient(135deg,#4338ca,#6366f1);'
@@ -198,128 +222,3 @@ def render_qa_history_html(history: list) -> str:
             f'padding:12px 16px;font-size:13px;color:#e2e8f0;line-height:1.7;max-width:78%;">{safe_a}</div></div>'
         )
     return html + '</div>'
-
-
-# ── Tutor Mode ────────────────────────────────────────────────────────────────
-
-_TUTOR_EXPLAIN_SYSTEM = (
-    "You are a patient coding tutor. Given source code and a topic, explain the topic clearly using examples "
-    "from the ACTUAL code provided. Structure: 1) Core concept, 2) How it appears in this code, 3) Key takeaways. "
-    "Under 350 words. Beginner-friendly."
-)
-_TUTOR_QUIZ_SYSTEM = (
-    "You are a coding tutor running a short interactive quiz. Ask ONE question at a time about the topic "
-    "and the student's specific code. If the answer is correct say 'Correct! ✅' then ask the next question. "
-    "If wrong, say 'Not quite ❌', explain briefly, then ask again or a related question. "
-    "After 3 correct answers say 'Quiz complete! 🎓 Great work!' and summarise what was learned. "
-    "Keep questions specific to this code, not generic."
-)
-
-
-def tutor_code(code_text: str, topic: str, phase: int, user_answer: str = "", history: list = None) -> dict:
-    if not is_lmstudio_online():
-        return {"content": "🔴 LM Studio is offline.", "phase": phase}
-    code, _ = smart_truncate(code_text, get_context_limit())
-    if phase == 1:
-        prompt = f"Topic: '{topic}'\n\nCode:\n```\n{code}\n```\n\nExplain this topic in the context of the code above."
-        content = ask_lmstudio(prompt=prompt, system_prompt=_TUTOR_EXPLAIN_SYSTEM, temperature=0.4)
-        return {"content": content, "phase": 1}
-    else:
-        hist_text = ""
-        for role, msg in (history or []):
-            hist_text += f"\n{'Student' if role == 'student' else 'Tutor'}: {msg}"
-        ctx = f"Code:\n```\n{code}\n```\nTopic: {topic}{hist_text}"
-        prompt = f"Student answer: {user_answer}" if user_answer else "Begin the quiz with your first question."
-        content = ask_lmstudio(prompt=prompt, context=ctx, system_prompt=_TUTOR_QUIZ_SYSTEM, temperature=0.5)
-        return {"content": content, "phase": 2}
-
-
-def render_tutor_html(content: str, phase: int, topic: str = "") -> str:
-    safe = _html.escape(content or "").replace("\n", "<br>")
-    label = "Phase 1 — Explanation" if phase == 1 else "Phase 2 — Interactive Quiz"
-    color = "#34d399" if phase == 1 else "#f59e0b"
-    icon = "📖" if phase == 1 else "🧠"
-    topic_html = f'<div style="font-size:11px;color:#64748b;margin-top:2px;">Topic: {_html.escape(topic)}</div>' if topic else ""
-    return (
-        f'<div style="background:#1e293b;border:1px solid #334155;border-radius:14px;'
-        f'padding:20px;font-family:\'Segoe UI\',sans-serif;">'
-        f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">'
-        f'<span style="font-size:20px;">{icon}</span>'
-        f'<div><div style="font-size:11px;font-weight:700;color:{color};letter-spacing:1px;text-transform:uppercase;">{label}</div>'
-        f'{topic_html}</div></div>'
-        f'<div style="font-size:14px;color:#e2e8f0;line-height:1.8;">{safe}</div>'
-        f'</div>'
-    )
-
-
-# ── Agent Mode ────────────────────────────────────────────────────────────────
-
-_AGENT_GEN_SYSTEM = (
-    "You are a code generator. Write complete, working code for the given task in the specified language. "
-    "Return ONLY the raw code — no markdown fences, no explanation, no prose. The code runs immediately."
-)
-_AGENT_FIX_SYSTEM = (
-    "You are a code debugger. The previous code failed. Fix it and return ONLY the corrected raw code. "
-    "No markdown fences, no explanation."
-)
-_AGENT_EXP_SYSTEM = (
-    "In 3-4 sentences, explain: 1) what the code does, 2) why it worked or failed based on the output shown. "
-    "Keep it beginner-friendly."
-)
-
-
-def agent_code(task: str, language: str, attempt: int = 1, prev_code: str = "", prev_error: str = "") -> dict:
-    if not is_lmstudio_online():
-        return {"code": "", "error": "🔴 LM Studio is offline."}
-    if attempt == 1 or not prev_code:
-        system = _AGENT_GEN_SYSTEM
-        prompt = f"Task: {task}\nLanguage: {language}\n\nWrite the complete code:"
-    else:
-        system = _AGENT_FIX_SYSTEM
-        prompt = (f"Task: {task}\nLanguage: {language}\n\n"
-                  f"Previous code:\n{prev_code}\n\nError:\n{prev_error}\n\nFixed code:")
-    code = ask_lmstudio(prompt=prompt, system_prompt=system, temperature=0.15)
-    code = code.strip()
-    # Strip markdown fences if model added them anyway
-    if code.startswith("```"):
-        lines = code.split("\n")
-        end = -1 if (len(lines) > 1 and lines[-1].strip() == "```") else len(lines)
-        code = "\n".join(lines[1:end])
-    return {"code": code, "error": ""}
-
-
-def get_agent_explanation(code: str, language: str, exec_result: dict) -> str:
-    stdout = (exec_result.get("stdout") or "").strip()[:600]
-    stderr = (exec_result.get("stderr") or "").strip()[:600]
-    success = exec_result.get("success", False)
-    prompt = (
-        f"Language: {language}\nCode (first 600 chars):\n{code[:600]}\n\n"
-        f"Execution {'succeeded' if success else 'failed'}.\n"
-        f"stdout: {stdout or '(empty)'}\n"
-        f"stderr: {stderr or '(empty)'}\n\nExplain what happened."
-    )
-    return ask_lmstudio(prompt=prompt, system_prompt=_AGENT_EXP_SYSTEM, temperature=0.4)
-
-
-def render_agent_failure_html(all_attempts: list, task: str) -> str:
-    """Rendered when all 3 attempts fail."""
-    header = (
-        f'<div style="background:#1e293b;border:2px solid #ef4444;border-radius:14px;'
-        f'padding:18px 22px;margin-bottom:16px;font-family:\'Segoe UI\',sans-serif;">'
-        f'<div style="color:#f87171;font-size:14px;font-weight:700;margin-bottom:6px;">❌ All 3 Attempts Failed</div>'
-        f'<div style="color:#94a3b8;font-size:13px;">The model could not generate working code for:<br>'
-        f'<em>{_html.escape(task)}</em></div>'
-        f'<div style="color:#64748b;font-size:12px;margin-top:8px;">Try simplifying the task, switching to a larger model in LM Studio, or selecting a different language.</div>'
-        f'</div>'
-    )
-    attempts_html = ""
-    for i, att in enumerate(all_attempts, 1):
-        err = _html.escape((att.get("stderr") or att.get("error") or "Unknown error")[:400])
-        attempts_html += (
-            f'<div style="background:#0d1117;border:1px solid #ef444444;border-radius:10px;'
-            f'padding:12px;margin-bottom:10px;font-family:monospace;font-size:12px;">'
-            f'<div style="color:#f87171;font-weight:700;margin-bottom:6px;">Attempt {i} error:</div>'
-            f'<pre style="color:#8b949e;white-space:pre-wrap;margin:0;">{err}</pre>'
-            f'</div>'
-        )
-    return f'<div style="font-family:\'Segoe UI\',sans-serif;">{header}{attempts_html}</div>'

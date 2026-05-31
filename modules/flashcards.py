@@ -18,6 +18,7 @@ from modules.structured_generation import (
 # =============================================
 
 BATCH_SIZE = 10
+MAX_FLASHCARDS = 30
 
 DIFFICULTY_RULES = {
     "Easy": "Create direct, simple recall cards with short answers.",
@@ -42,7 +43,7 @@ def generate_flashcards_result(text: str = "", filename: str = "", num_cards: in
     context = build_balanced_context(chunks or [text], max_words=ctx_words, target_chunks=12)
     difficulty = difficulty if difficulty in DIFFICULTY_RULES else "Medium"
 
-    requested = max(1, int(num_cards))
+    requested = max(1, min(int(num_cards), MAX_FLASHCARDS))
     all_cards = []
     dropped_total = 0
     used_retry = False
@@ -101,23 +102,6 @@ def generate_flashcards_result(text: str = "", filename: str = "", num_cards: in
         note_for_status(status),
         {"requested": requested, "returned": min(len(all_cards), requested), "dropped": dropped_total},
     )
-
-
-def generate_flashcards(text: str = "", filename: str = "", num_cards: int = 10,
-                        chunks: list[str] | None = None, difficulty: str = "Medium") -> list:
-    result = generate_flashcards_result(
-        text=text,
-        filename=filename,
-        num_cards=num_cards,
-        chunks=chunks,
-        difficulty=difficulty,
-    )
-    cards = result.get("data", {}).get("cards", [])
-    return cards if cards else [
-        {"question": "Generation failed",
-         "answer": "Could not generate flashcards. Try a different document or model."}
-    ]
-
 
 def _merge_cards(existing: list[dict], new_cards: list[dict], requested: int) -> tuple[list[dict], int]:
     valid = existing + _validate_cards(new_cards)

@@ -8,6 +8,92 @@
 
 ## Session Log
 
+### [2026-05-29] — Audio Overview MVP
+
+**Summary:** Added a native `🎙️ Audio` tab that turns a selected Library document into a grounded two-host study transcript, with optional local Piper synthesis and MP3/WAV export.
+
+| File | Change | Reason |
+|---|---|---|
+| `modules/audio_overview.py` | **New module** — staged outline + dialogue generation, strict JSON validation/repair, transcript export, Piper voice routing, WAV assembly, and optional ffmpeg MP3 conversion | Adds NotebookLM-style audio overview behavior without duplicating StudyMind's retrieval stack |
+| `modules/ai_engine.py` | Added optional `max_tokens` parameter to `ask_lmstudio()` | Audio scripts need a larger structured response budget while preserving existing defaults |
+| `app.py` | Added `🎙️ Audio` tab, Library document selector sync, retrieval-backed context building, transcript preview, audio player, and transcript/audio downloads | Integrates the feature into the existing Gradio workflow |
+| `tests/test_structured_generation.py` | Added audio overview validation and WAV assembly tests | Proves speaker routing repair and dependency-free audio stitching behavior |
+| `README.md` | Documented the Audio Overview feature, optional Piper/ffmpeg setup, and new module | Keep user-facing docs aligned with the visible app surface |
+
+**Implementation note:** Piper and ffmpeg are optional local tools. If they are missing, StudyMind still generates and exports the transcript instead of failing the whole workflow.
+
+### [2026-05-25] — Dead Code Removal Pass
+
+| File | Change | Reason |
+|---|---|---|
+| `app.py` | Removed stale imports, an unused text-sanitizer helper, and an unused document-info helper; simplified Home refresh to the LM Studio-only path | Trim app-layer dead code left behind by earlier engine/theme and math-renderer changes |
+| `modules/engine_manager.py` | Removed unused mode/theme config plumbing and kept only the active LM Studio ask/status helpers | The app no longer exposes engine-mode switching or theme persistence through this module |
+| `modules/quiz.py` + `modules/flashcards.py` + `modules/mindmap.py` | Removed unused compatibility wrapper functions that were no longer called by the app | Keep generation modules aligned with the live Gradio surface |
+| `modules/vector_store.py` | Removed the unused `is_model_ready()` helper | The app no longer reads this preload status directly |
+| `modules/math_renderer.py` | Removed the dormant plain-text second-pass renderer and kept the active LaTeX rendering path only | The current app uses only the LaTeX rendering path, so the extra pass was dead code |
+| `modules/execution_sandbox.py` + `diagnose.py` + `patch_format_header.py` | Deleted detached sandbox/debug/one-shot patch files that are no longer used anywhere in the app | Remove non-functional leftovers from older Coding Agent and repair work |
+| `README.md` | Updated module descriptions to match the trimmed codebase | Keep repo documentation aligned with the current files |
+
+### [2026-05-25] — Quiz And Flashcard Session Caps
+
+| File | Change | Reason |
+|---|---|---|
+| `app.py` | Reduced Quiz and Flashcards slider maximums from 40 to 30 and clamped handler inputs to the same caps | Keep the UI and app-layer requests aligned with the new session limit |
+| `modules/quiz.py` | Capped generated quiz requests at 30 questions | Enforce the new quiz maximum even if a larger value bypasses the UI |
+| `modules/flashcards.py` | Capped generated flashcard requests at 30 cards | Enforce the new flashcard maximum even if a larger value bypasses the UI |
+| `README.md` | Updated quiz and flashcard feature descriptions from 40 to 30 | Keep visible documentation accurate |
+
+### [2026-05-21] — Coding Tab Scope Reduction
+
+**Summary:** Renamed `⚡ Coding Agent` to `⚡ Coding` and reduced the feature to two modes only: **Explain** and **Ask AI**.
+
+| File | Change | Reason |
+|---|---|---|
+| `app.py` | Removed Tutor and Agent mode buttons, columns, state objects, and callback wiring from the Coding tab | Current Coding feature should only expose Explain and Ask AI |
+| `app.py` | Renamed the tab and header copy from `⚡ Coding Agent` to `⚡ Coding`; renamed the code Q&A mode button from `Q&A` to `Ask AI` | Match the requested product wording |
+| `app.py` | Removed unused Tutor/Agent imports and helper functions from the app layer | Avoid dead UI paths and hidden callbacks |
+| `modules/coding_agent.py` | Removed Tutor and Agent mode generation/rendering functions; updated module copy to describe Explain + Ask AI only | Keep the module aligned with the active UI surface |
+| `README.md` | Updated feature list, supported file types, project structure, and version history for the simplified Coding tab | Keep user-facing docs current |
+
+**Current Coding modes:**
+- **Explain** — structured six-section code breakdown rendered by the app
+- **Ask AI** — chat-style questions about the loaded Library code file
+
+**Deferred:** Agent mode and its sandbox module are not exposed in the UI and will be reviewed later.
+
+### [2026-05-21] — Coding Agent Tab (v1.3)
+
+**Summary:** New `⚡ Coding Agent` tab with four modes — Explain, Q&A, Tutor, Agent — sharing one Library-sourced file picker, a styled button mode switcher, and a local execution sandbox that runs code across six languages with a 3-attempt auto-fix retry loop.
+
+| File | Change | Reason |
+|---|---|---|
+| `modules/coding_agent.py` | **New module** — `explain_code()`, `qa_code()`, `tutor_code()`, `agent_code()`, `get_agent_explanation()`, `render_agent_failure_html()`, and HTML renderers for all four modes | Core logic for all Coding Agent modes |
+| `modules/execution_sandbox.py` | **New module** — `run_code()` with subprocess runner, 10s hard timeout, per-language compile+run flows (Python, C, C++, JS, Java, HTML/CSS), `check_dependencies()`, `get_dependency_banner_html()`, `render_agent_output_html()` | Execution layer for Agent mode |
+| `modules/code_viewer.py` | **New module** — `syntax_highlight_html()` with Pygments (fallback: styled `<pre>`), `get_language_from_filename()`, `render_code_empty_state()` | VS Code-style code previewer used in file picker |
+| `app.py` | Added `⚡ Coding Agent` as Tab 6 with mode switcher, Library file picker, code preview panel, and per-mode input/output sections | New feature tab |
+| `app.py` | Imported all three new modules at top of file | Make new modules available |
+| `app.py` | `APP_VERSION` bumped `v1.2` → `v1.3` | New major feature |
+| `app.py` | `CODE_EXTENSIONS` constant added (`{.py .js .ts .c .cpp .java .html .css}`) | Shared extension set used by Library and Coding Agent |
+| `app.py` | `load_files()` extended to accept code file extensions; stores `code_text` field in library entry for code files; added code-file emoji icons | Library now handles code files |
+| `app.py` | `get_code_file_dropdown_update()` helper added — filters library to code files only | Powers the Coding Agent file picker dropdown |
+| `app.py` | `get_library_outputs()` extended to return `ca_file_selector` update (8 outputs → was 7) | Coding Agent file picker auto-updates on every Library change |
+| `app.py` | `lib_sync`, `upload_btn.click` outputs, and all Library button wirings updated to include `ca_file_selector` | Keeps file picker in sync across all Library operations |
+| `app.py` | Library tab info banner updated to list code formats | Users can see code files are supported |
+| `app.py` | `file_input` updated to accept code extensions | Gradio file picker shows code files in the OS dialog |
+| `app.py` | Added all Coding Agent handler functions: `ca_load_file_fn`, `ca_switch_mode`, `ca_switch_to_agent`, `ca_run_explain_fn`, `ca_run_qa_fn`, `ca_clear_qa_fn`, `ca_start_tutor_fn`, `ca_start_quiz_fn`, `ca_submit_answer_fn`, `ca_run_agent_fn`, `render_ca_empty_output` | Coding Agent UI logic |
+
+**Feature detail — Four Modes:**
+- **Explain** — LLM returns JSON with 6 sections (Summary, Functions, Classes, Logic Flow, Issues, Test Suggestions); app renders as structured HTML cards
+- **Q&A** — Full code injected as context per message; chat history kept; last 3 turns sent to model
+- **Tutor** — Phase 1: topic explanation; Phase 2: interactive quiz with `▶ Start Quiz` transition button
+- **Agent** — Task description + language dropdown → LLM generates code → subprocess runs it (10s timeout) → AI explains result → auto-fix retry up to 3 attempts with attempt indicator
+
+**Smart truncation:** Context limit read from LM Studio `/v1/models`; falls back to 2048 tokens. Files that exceed the budget have their middle section condensed with a visible truncation banner.
+
+**Security:** Agent mode shows a one-time warning. Code runs locally. Docker isolation deferred to v2.0.
+
+---
+
 ### [2026-05-14] — OCR: Scanned PDF Support
 
 | File | Change | Reason |

@@ -4,10 +4,11 @@ import fitz  # PyMuPDF
 
 # =============================================
 # 📄 Document Reader Module
-# Supports: PDF, DOCX, TXT, MD, PPTX, EPUB
+# Supports: PDF, DOCX, TXT, MD, PPTX, EPUB, and source code files
 # =============================================
 
-SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".pptx", ".epub"]
+CODE_EXTENSIONS = {".py", ".js", ".ts", ".c", ".cpp", ".java", ".html", ".css"}
+SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".pptx", ".epub", *sorted(CODE_EXTENSIONS)]
 
 
 def _has_meaningful_text(text: str, threshold: int = 24) -> bool:
@@ -94,7 +95,7 @@ def _missing_ocr_dependencies() -> bool:
 def read_file(file_path: str) -> str:
     """
     Auto-detects file type and extracts plain text.
-    Supports .pdf, .docx, .txt, .md, .pptx, .epub
+    Supports .pdf, .docx, .txt, .md, .pptx, .epub, and source code files.
     """
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".pdf":
@@ -109,6 +110,8 @@ def read_file(file_path: str) -> str:
         return read_pptx(file_path)
     elif ext == ".epub":
         return read_epub(file_path)
+    elif ext in CODE_EXTENSIONS:
+        return read_code(file_path)
     else:
         return f"❌ Unsupported file type: {ext}. Supported: {', '.join(SUPPORTED_EXTENSIONS)}"
 
@@ -237,6 +240,22 @@ def read_md(file_path: str) -> str:
     return text
 
 
+def read_code(file_path: str) -> str:
+    """Reads a source code file without stripping formatting or indentation."""
+    for encoding in ("utf-8", "utf-8-sig", "latin-1", "cp1252"):
+        try:
+            with open(file_path, "r", encoding=encoding) as f:
+                text = f.read()
+            if text.strip():
+                return text.rstrip()
+            return "⚠️ This code file appears to be empty."
+        except (UnicodeDecodeError, LookupError):
+            continue
+        except Exception as e:
+            return f"❌ Error reading code file: {str(e)}"
+    return "⚠️ Could not decode this code file."
+
+
 def read_pptx(file_path: str) -> str:
     """
     Extracts text from a PowerPoint (.pptx) file slide by slide.
@@ -332,7 +351,7 @@ def get_page_count(file_path: str) -> int:
     Returns a meaningful unit count per file type:
     PDF  → pages       DOCX → paragraphs
     PPTX → slides      EPUB → chapters
-    TXT/MD → estimated pages (~300 words each)
+    TXT/MD/source code → estimated pages (~300 words each)
     """
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".pdf":
@@ -364,7 +383,7 @@ def get_page_count(file_path: str) -> int:
             return len(list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT)))
         except Exception:
             return 0
-    elif ext in (".txt", ".md"):
+    elif ext in (".txt", ".md") or ext in CODE_EXTENSIONS:
         try:
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 words = len(f.read().split())
@@ -385,6 +404,8 @@ def get_page_label(file_path: str) -> str:
         ".txt":  "est. pages",
         ".md":   "est. pages",
     }
+    if ext in CODE_EXTENSIONS:
+        return "est. pages"
     return labels.get(ext, "pages")
 
 

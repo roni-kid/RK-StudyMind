@@ -16,6 +16,9 @@ data/
 # Uploaded PDFs — personal files
 uploads/
 
+# Exported study outputs — personal (quiz reports, flashcard CSVs, mindmaps)
+exports/
+
 # LM Studio / model files
 *.gguf
 *.bin

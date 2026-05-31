@@ -113,22 +113,6 @@ def generate_mindmap_tree_result(text: str = "", topic: str = "",
         {"concepts": 0, "branches": len(tree.get("branches", []))},
     )
 
-
-def generate_mindmap_markdown(text: str = "", topic: str = "",
-                              chunks: list | None = None) -> str:
-    """Compatibility wrapper that returns Markdown from the app-built tree."""
-    result = generate_mindmap_tree_result(text=text, topic=topic, chunks=chunks)
-    tree = result.get("data", {}).get("tree") or {
-        "root": "Study Map",
-        "branches": [{
-            "title": "Review Needed",
-            "summary": "The model output could not be structured.",
-            "children": ["Regenerate the mindmap"],
-        }],
-    }
-    return tree_to_markdown(tree)
-
-
 def _build_mindmap_context(text: str = "", chunks: list | None = None) -> str:
     if chunks:
         from modules.study_context import build_balanced_context
@@ -288,24 +272,6 @@ def build_mindmap_tree(payload: dict, topic: str = "") -> dict:
             "children": [item["text"] for item in children[:6]] or ["Review this concept"],
         })
     return {"root": root, "branches": clean_branches}
-
-
-def tree_to_markdown(tree: dict) -> str:
-    root = _clean_label(tree.get("root") or tree.get("text") or "Study Map", limit=70) or "Study Map"
-    lines = [f"# {root}"]
-    for branch in tree.get("branches", []):
-        title = _clean_label(branch.get("title") or branch.get("text") or "Branch", limit=70)
-        lines.append(f"## {title or 'Branch'}")
-        summary = clean_text(branch.get("summary"), limit=130)
-        if summary:
-            lines.append(f"Summary: {summary}")
-        for child in branch.get("children", []):
-            label = child.get("text") if isinstance(child, dict) else child
-            label = _clean_label(label, limit=95)
-            if label:
-                lines.append(f"### {label}")
-    return "\n".join(lines)
-
 
 def markdown_to_tree_data(markdown: str) -> dict:
     parsed = parse_tree(clean_markdown(markdown))

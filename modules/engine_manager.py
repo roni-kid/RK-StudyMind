@@ -1,60 +1,9 @@
-import os
-import json
 import requests
 
 # =============================================
 # 🤖 Engine Manager — LM Studio Router
 # All AI calls go through LM Studio (localhost:1234)
 # =============================================
-
-CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
-    "data", "engine_config.json"
-)
-
-DEFAULT_CONFIG = {
-    "mode":  "lmstudio",
-    "theme": "dark",
-}
-
-
-# ── Config helpers ────────────────────────────────────────────────
-
-def load_engine_config() -> dict:
-    try:
-        if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            for k, v in DEFAULT_CONFIG.items():
-                cfg.setdefault(k, v)
-            return cfg
-    except Exception as exc:
-        print(f"⚠️ Could not load engine config: {exc}")
-    return dict(DEFAULT_CONFIG)
-
-
-def save_engine_config(cfg: dict) -> None:
-    try:
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-    except Exception as exc:
-        print(f"⚠️ Could not save engine config: {exc}")
-
-
-def get_active_mode() -> str:
-    return "lmstudio"
-
-
-def get_theme() -> str:
-    return load_engine_config().get("theme", "dark")
-
-
-def set_theme(theme: str) -> None:
-    cfg = load_engine_config()
-    cfg["theme"] = theme
-    save_engine_config(cfg)
-
 
 # ── Unified ask — always routes to LM Studio ─────────────────────
 

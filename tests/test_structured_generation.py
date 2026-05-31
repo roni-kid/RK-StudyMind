@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import tempfile
 import unittest
 
 
@@ -10,6 +11,45 @@ if ROOT not in sys.path:
 
 
 class StructuredGenerationTests(unittest.TestCase):
+    def test_code_files_are_read_without_losing_indentation(self):
+        from modules.pdf_reader import read_file, get_page_count, get_page_label
+
+        source = "def greet(name):\n    return f'Hi {name}'\n"
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as handle:
+            handle.write(source)
+            path = handle.name
+        try:
+            self.assertEqual(read_file(path), source.rstrip())
+            self.assertEqual(get_page_label(path), "est. pages")
+            self.assertGreaterEqual(get_page_count(path), 1)
+        finally:
+            os.unlink(path)
+
+    def test_library_snapshot_preserves_code_text(self):
+        import modules.doc_library as doc_library
+
+        original_path = doc_library.LIBRARY_SNAPSHOT_PATH
+        with tempfile.TemporaryDirectory() as tmp:
+            doc_library.LIBRARY_SNAPSHOT_PATH = os.path.join(tmp, "library.json")
+            try:
+                doc_library.save_library_snapshot({
+                    "abc": {
+                        "id": "abc",
+                        "filename": "example.py",
+                        "chunks": ["def x(): pass"],
+                        "pages": 1,
+                        "unit_label": "est. pages",
+                        "words": 3,
+                        "code_text": "def x():\n    pass",
+                    }
+                }, "abc")
+                library, active = doc_library.load_library_snapshot()
+            finally:
+                doc_library.LIBRARY_SNAPSHOT_PATH = original_path
+
+        self.assertEqual(active, "abc")
+        self.assertEqual(library["abc"]["code_text"], "def x():\n    pass")
+
     def test_mindmap_builds_tree_from_unordered_concepts(self):
         from modules.mindmap import build_mindmap_tree
 
@@ -112,6 +152,53 @@ class StructuredGenerationTests(unittest.TestCase):
         self.assertEqual(len({item["question"] for item in cards}), 3)
         self.assertIn("Already accepted", prompts[-1])
         self.assertEqual(result["status"], "repaired")
+
+
+    def test_audio_overview_repairs_speaker_routing(self):
+        from modules.audio_overview import validate_script
+
+        raw = {
+            "metadata": {"title": "Energy Notes", "estimated_minutes": 6},
+            "turns": [
+                {"speaker": "host_a", "text": "Welcome in. Today we are unpacking energy transfer from the notes. [music]"},
+                {"speaker": "host_a", "text": "Right, and the key idea is that energy changes form while total energy is conserved."},
+                {"speaker": "host_b", "text": "So the useful question is where the energy goes during each process."},
+                {"speaker": "host_b", "text": "Exactly, and examples help keep that from becoming too abstract."},
+            ],
+        }
+        script, repaired = validate_script(raw, source_title="Energy Notes", preset={"min_turns": 4, "max_turns": 8, "target_turns": 4})
+
+        self.assertTrue(repaired)
+        self.assertIsNotNone(script)
+        speakers = [turn["speaker"] for turn in script["turns"]]
+        self.assertEqual(speakers, ["HOST_A", "HOST_B", "HOST_A", "HOST_B"])
+        self.assertNotIn("[music]", script["turns"][0]["text"])
+
+    def test_audio_overview_assembles_wav_segments(self):
+        import wave
+        from pathlib import Path
+        from modules.audio_overview import assemble_wav_segments
+
+        def write_wav(path):
+            with wave.open(str(path), "wb") as out:
+                out.setnchannels(1)
+                out.setsampwidth(2)
+                out.setframerate(8000)
+                out.writeframes(b"\x00\x00" * 800)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "first.wav"
+            second = Path(tmp) / "second.wav"
+            combined = Path(tmp) / "combined.wav"
+            write_wav(first)
+            write_wav(second)
+
+            assemble_wav_segments([first, second], combined, pause_ms=100)
+
+            self.assertTrue(combined.exists())
+            with wave.open(str(combined), "rb") as result:
+                self.assertGreater(result.getnframes(), 1600)
+
 
 
 if __name__ == "__main__":

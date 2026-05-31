@@ -9,7 +9,7 @@ Bug fixes (Each feature)
 
 ## V1.2
 
-Feature Usability where each feature works best
+> Coding Agent
 
 ---
 
@@ -17,4 +17,4 @@ Feature Usability where each feature works best
 
 > Podcast
 > Video Overview
-> Coding Agent
+

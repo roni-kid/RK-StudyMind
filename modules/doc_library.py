@@ -36,6 +36,7 @@ def save_library_snapshot(library: dict, active_doc_id: str = "") -> None:
                 "pages":      info.get("pages", 0),
                 "unit_label": info.get("unit_label", "pages"),
                 "words":      info.get("words", 0),
+                "code_text":  info.get("code_text", ""),
             })
         payload = {
             "active_doc_id": active_doc_id or "",
@@ -66,6 +67,7 @@ def load_library_snapshot() -> tuple[dict, str]:
                 "pages":      item.get("pages", 0),
                 "unit_label": item.get("unit_label", "pages"),
                 "words":      item.get("words", 0),
+                "code_text":  item.get("code_text", ""),
             }
         active_doc_id = payload.get("active_doc_id", "")
         if active_doc_id not in library and library:
@@ -85,7 +87,7 @@ def render_library_html(lib: dict = None, active_doc_id: str = None) -> str:
         <div style="display:flex;justify-content:center;align-items:center;min-height:120px;
                     border:2px dashed {RK_BORDER_STRONG};border-radius:16px;color:{RK_TEXT_FAINT};
                     font-family:'Segoe UI',sans-serif;font-size:15px;">
-          No documents yet — upload PDF, DOCX, TXT, MD, PPTX, or EPUB in the 📚 Library tab
+          No documents yet — upload PDF, DOCX, TXT, MD, PPTX, EPUB, or code files in the 📚 Library tab
         </div>"""
 
     EXT_STYLES = {
@@ -95,6 +97,14 @@ def render_library_html(lib: dict = None, active_doc_id: str = None) -> str:
         "MD":   ("#7C3AED", "#EFE3FF"),
         "PPTX": ("#C2410C", "#FEE7D6"),
         "EPUB": ("#166534", "#DCFCE7"),
+        "PY":   ("#2563EB", "#DBEAFE"),
+        "JS":   ("#854D0E", "#FEF3C7"),
+        "TS":   ("#1D4ED8", "#DBEAFE"),
+        "C":    ("#475569", "#E2E8F0"),
+        "CPP":  ("#475569", "#E2E8F0"),
+        "JAVA": ("#B45309", "#FFEDD5"),
+        "HTML": ("#C2410C", "#FFEDD5"),
+        "CSS":  ("#0E7490", "#CFFAFE"),
     }
 
     cards_html = ""

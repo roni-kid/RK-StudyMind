@@ -1,4 +1,3 @@
-import json
 import re
 from modules.ai_engine import ask_lmstudio
 from modules.study_context import build_balanced_context
@@ -20,6 +19,7 @@ from modules.structured_generation import (
 VALID_ANSWERS = ["A", "B", "C", "D"]
 
 BATCH_SIZE = 3   # Questions per LLM call — small batches = higher reliability
+MAX_QUIZ_QUESTIONS = 30
 
 DIFFICULTY_RULES = {
     "Easy": "Use straightforward fact-recall questions, simple wording, and obvious distractors.",
@@ -45,7 +45,7 @@ def generate_quiz_result(text: str = "", chunks: list[str] | None = None,
     context = build_balanced_context(chunk_pool, max_words=ctx_words, target_chunks=12)
     difficulty = difficulty if difficulty in DIFFICULTY_RULES else "Medium"
 
-    requested = max(1, int(num_questions))
+    requested = max(1, min(int(num_questions), MAX_QUIZ_QUESTIONS))
     all_questions = []
     dropped_total = 0
     used_retry = False
@@ -119,18 +119,6 @@ def generate_quiz_result(text: str = "", chunks: list[str] | None = None,
         note_for_status(status),
         {"requested": requested, "returned": min(len(all_questions), requested), "dropped": dropped_total},
     )
-
-
-def generate_quiz(text: str = "", chunks: list[str] | None = None, num_questions: int = 5,
-                  difficulty: str = "Medium") -> list:
-    result = generate_quiz_result(
-        text=text,
-        chunks=chunks,
-        num_questions=num_questions,
-        difficulty=difficulty,
-    )
-    return result.get("data", {}).get("questions", [])
-
 
 def _merge_questions(existing: list[dict], new_questions: list[dict], requested: int) -> tuple[list[dict], int]:
     deduped, dropped = dedupe_by(existing + new_questions, lambda q: normalize_key(q.get("question", "")))

@@ -186,12 +186,6 @@ def preload_model_background():
         _preload_thread = threading.Thread(target=_preload_worker, daemon=True)
         _preload_thread.start()
 
-
-def is_model_ready() -> bool:
-    """True once an embedding backend is confirmed ready."""
-    return _model_ready_evt.is_set()
-
-
 def get_embed_backend() -> str:
     """
     Returns a human-readable string for the Home tab status card.

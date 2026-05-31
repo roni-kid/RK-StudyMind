@@ -9,16 +9,12 @@ import uuid
 
 sys.path.append(os.path.dirname(__file__))
 from modules.pdf_reader import read_file, get_page_count, get_page_label, chunk_text
-from modules.ai_engine import ask_lmstudio, check_lmstudio_connection, is_lmstudio_online
-import time
+from modules.ai_engine import check_lmstudio_connection, is_lmstudio_online
 from modules.vector_store import (
     index_chunks, search_similar_chunks, preload_model_background,
-    is_model_ready, clear_index, drop_session, get_embed_backend
+    clear_index, get_embed_backend
 )
-from modules.engine_manager import (
-    get_active_mode, get_theme, set_theme,
-    ask, get_engine_status,
-)
+from modules.engine_manager import ask, get_engine_status
 
 # Kick off embedding model load in background immediately at startup
 preload_model_background()
@@ -28,7 +24,7 @@ _adaptive_model_info = initialize_adaptive_strategy()
 from modules.flashcards import generate_flashcards_result
 from modules.mindmap import generate_mindmap_tree_result, mindmap_to_html, save_mindmap_file
 from modules.quiz import generate_quiz_result
-from modules.doc_library import render_library_html, save_library_snapshot, load_library_snapshot
+from modules.doc_library import render_library_html, save_library_snapshot
 from modules.exporters import export_flashcards_csv, export_quiz_report
 from modules.study_context import build_balanced_context
 from modules.study_history import (
@@ -37,8 +33,18 @@ from modules.study_history import (
     get_quiz_analytics,
     get_hard_flashcards,
 )
-from modules.math_renderer import render_math, render_math_html, render_plain_math_html
+from modules.math_renderer import render_math, render_math_html
 from _splash_patch import SPLASH_JS as _SPLASH_JS, css as _SPLASH_CSS
+from modules.coding_agent import (
+    explain_code, render_explain_html,
+    qa_code, render_qa_history_html,
+)
+from modules.code_viewer import syntax_highlight_html, get_language_from_filename, render_code_empty_state
+from modules.audio_overview import (
+    AUDIO_DURATION_CHOICES, DEFAULT_DURATION,
+    generate_audio_overview_result, get_duration_preset,
+    render_transcript_html,
+)
 
 # ── Config + File Profiler ────────────────────────────────────────────────────
 from modules.file_profiler import load_config, get_profiler
@@ -65,18 +71,17 @@ STUDY_TIPS = [
 ]
 
 DIFFICULTY_CHOICES = ["Easy", "Medium", "Hard", "Difficult"]
+MAX_QUIZ_QUESTIONS = 30
+MAX_FLASHCARDS = 30
 
-APP_VERSION = "v1.2"
+APP_VERSION = "v1.3"
+
+CODE_EXTENSIONS = {'.py', '.js', '.ts', '.c', '.cpp', '.java', '.html', '.css'}
 
 
 def generation_status_note(result: dict) -> str:
     note = str((result or {}).get("note") or "").strip()
     return f" · {note}" if note else ""
-
-
-def safe_ui_str(s: str) -> str:
-    """Strip lone surrogate code points that orjson/Gradio cannot serialize."""
-    return s.encode("utf-8", errors="replace").decode("utf-8")
 
 
 def new_session_state() -> dict:
@@ -137,10 +142,6 @@ def get_active_doc(session_state: dict) -> dict | None:
 def get_active_filename(session_state: dict) -> str:
     active = get_active_doc(session_state)
     return active.get("filename", "") if active else ""
-
-
-def get_doc_info(session_state: dict, doc_id: str) -> dict:
-    return get_library(session_state).get(doc_id, {})
 
 
 def get_all_doc_ids(session_state: dict) -> list:
@@ -429,7 +430,7 @@ def refresh_home(session_state):
     session_state = ensure_session_state(session_state)
     # Invalidate cached model detection so a model swap in LM Studio is picked up immediately
     adaptive_strategy.invalidate_cache()
-    ai_status = check_lmstudio_connection() if get_active_mode() == "lmstudio" else ""
+    ai_status = check_lmstudio_connection()
     return (
         render_home_stats(session_state, ai_status),
         render_engine_status_html(),
@@ -454,6 +455,24 @@ def make_upload_outputs(session_state, message: str, ok: bool = True):
         session_state,
     )
 
+def get_code_file_dropdown_update(session_state):
+    """Return a gr.update for the Coding file dropdown, listing only code files."""
+    choices = [
+        (info.get("filename", doc_id), doc_id)
+        for doc_id, info in get_library(session_state).items()
+        if os.path.splitext(info.get("filename", ""))[1].lower() in CODE_EXTENSIONS
+    ]
+    return gr.update(choices=choices, value=(choices[0][1] if choices else None))
+
+
+def get_audio_doc_dropdown_update(session_state):
+    """Return a gr.update for the Audio document dropdown."""
+    choices = get_doc_choices(session_state)
+    active = session_state.get("active_doc_id")
+    value = active if active in get_library(session_state) else (choices[0][1] if choices else None)
+    return gr.update(choices=choices, value=value)
+
+
 def get_library_outputs(session_state):
     return (
         render_library_html(get_library(session_state), session_state.get("active_doc_id", "")),
@@ -462,7 +481,9 @@ def get_library_outputs(session_state):
         get_checkbox_update(session_state),
         get_checkbox_update(session_state),
         get_checkbox_update(session_state),
+        get_audio_doc_dropdown_update(session_state),
         render_qa_status_html(session_state),
+        get_code_file_dropdown_update(session_state),
     )
 
 
@@ -509,7 +530,8 @@ def load_files(session_state, files):
             f"⏳ Processing {index}/{total_files}: {fn}\n\n" + "\n".join(results or ["Preparing file…"]),
         )
 
-        if ext not in ['.pdf', '.docx', '.txt', '.md', '.pptx', '.epub']:
+        if ext not in ['.pdf', '.docx', '.txt', '.md', '.pptx', '.epub',
+                       '.py', '.js', '.ts', '.c', '.cpp', '.java', '.html', '.css']:
             results.append(f"❌ Skipped '{fn}': unsupported type")
             continue
 
@@ -592,6 +614,7 @@ def load_files(session_state, files):
                 "pages":      plan_pages,
                 "unit_label": plan_unit,
                 "words":      word_count,
+                "code_text":  plan_text if ext in CODE_EXTENSIONS else "",  # full text for Coding
             }
 
             part_tag = f"part {split_idx}/{split_tot} — " if split_idx else ""
@@ -619,7 +642,9 @@ def load_files(session_state, files):
                 session_state["active_doc_id"] = doc_id
             persist_library(session_state)
 
-            icon      = {'.pdf': '📄', '.docx': '📝', '.txt': '📃', '.md': '📋', '.pptx': '📊', '.epub': '📖'}.get(ext, '📄')
+            icon      = {'.pdf': '📄', '.docx': '📝', '.txt': '📃', '.md': '📋', '.pptx': '📊', '.epub': '📖',
+                         '.py': '🐍', '.js': '🟨', '.ts': '🔷', '.c': '⚙️', '.cpp': '⚙️',
+                         '.java': '☕', '.html': '🌐', '.css': '🎨'}.get(ext, '📄')
             part_note = f" [split {split_idx}/{split_tot}]" if split_idx else ""
             results.append(
                 f"{icon} '{plan_label}'{part_note} — {word_count:,} words, "
@@ -933,7 +958,8 @@ def start_quiz(session_state, num_q, selected_docs, difficulty):
     chunks = get_chunks_from_selection(selected_docs, session_state)
     if not chunks: return "⚠️ No text.", render_quiz_empty(), 0, None, False, 0, *qbm(), session_state, render_quiz_analytics_html()
     difficulty = difficulty if difficulty in DIFFICULTY_CHOICES else "Medium"
-    quiz_result = generate_quiz_result(chunks=chunks, num_questions=int(num_q), difficulty=difficulty)
+    requested_questions = max(1, min(int(num_q), MAX_QUIZ_QUESTIONS))
+    quiz_result = generate_quiz_result(chunks=chunks, num_questions=requested_questions, difficulty=difficulty)
     questions = quiz_result.get("data", {}).get("questions", [])
     if not questions: return "⚠️ Could not generate quiz.", render_quiz_empty(), 0, None, False, 0, *qbm(), session_state, render_quiz_analytics_html()
     session_state["current_quiz"] = questions
@@ -1129,7 +1155,8 @@ def make_flashcards(session_state, num_cards, selected_docs, difficulty):
     if not chunks: return "⚠️ No text.", render_empty_card(), 0, False, 0, 0, *qmode(), session_state
     difficulty = difficulty if difficulty in DIFFICULTY_CHOICES else "Medium"
     src = get_source_label(selected_docs, session_state)
-    card_result = generate_flashcards_result(chunks=chunks, filename=src, num_cards=int(num_cards), difficulty=difficulty)
+    requested_cards = max(1, min(int(num_cards), MAX_FLASHCARDS))
+    card_result = generate_flashcards_result(chunks=chunks, filename=src, num_cards=requested_cards, difficulty=difficulty)
     cards = card_result.get("data", {}).get("cards", [])
     if not cards:
         return ("⚠️ Could not generate flashcards.", render_empty_card(), 0, False, 0, 0, *qmode(), session_state)
@@ -1279,6 +1306,206 @@ def make_mindmap_full(session_state, topic, selected_docs):
     yield render_mm_status(f"✅ Mindmap ready · {_html.escape(source)}{generation_status_note(mm_result)} · 📂 Download below to open with full controls"), html_out, file_path, session_state
 
 
+
+# ── Audio Overview Helpers ───────────────────────────────────────────────────
+
+def render_audio_status(message: str = "", ok: bool = True) -> str:
+    if not message:
+        return ""
+    color = "#10b981" if ok else "#ef4444"
+    return (
+        f'<div style="background:#1e293b;border:1px solid {color}33;border-left:4px solid {color};'
+        'border-radius:12px;padding:13px 18px;font-family:\'Segoe UI\',sans-serif;'
+        f'font-size:13px;color:#f1f5f9;white-space:pre-line;line-height:1.7;">{_html.escape(str(message))}</div>'
+    )
+
+
+def render_audio_empty() -> str:
+    return (
+        '<div style="background:#1e293b;border:2px dashed #334155;border-radius:16px;min-height:220px;'
+        'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;'
+        'font-family:\'Segoe UI\',sans-serif;">'
+        '<div style="font-size:36px;">🎙️</div>'
+        '<div style="color:#64748b;font-size:14px;font-weight:600;">Generate an audio overview to preview the transcript</div>'
+        '</div>'
+    )
+
+
+def render_audio_loading(step: str) -> str:
+    return (
+        '<div style="background:#111827;border:1px solid #312e81;border-radius:16px;min-height:220px;'
+        'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;'
+        'font-family:\'Segoe UI\',sans-serif;">'
+        '<div style="font-size:40px;animation:rk-spin 3s linear infinite;">🎙️</div>'
+        f'<div style="color:#818cf8;font-size:15px;font-weight:700;">{_html.escape(step)}</div>'
+        '<div style="color:#64748b;font-size:13px;">Local generation can take a moment.</div>'
+        '</div>'
+    )
+
+
+def get_audio_context_for_doc(session_state, doc_id, duration_label):
+    library = get_library(session_state)
+    doc = library.get(doc_id)
+    if not doc:
+        return "", "No document selected"
+
+    preset = get_duration_preset(duration_label)
+    query = (
+        "main ideas, key examples, misconceptions, surprising facts, conclusions, "
+        "and the best educational flow for an audio overview"
+    )
+    try:
+        evidence = search_similar_chunks(
+            question=query,
+            doc_id=doc_id,
+            session_id=session_state["session_id"],
+            top_k=int(preset.get("top_k", 8)),
+            include_metadata=True,
+        )
+    except Exception as exc:
+        evidence = []
+        print(f"[audio_overview] retrieval failed, using balanced fallback: {exc}")
+
+    if evidence:
+        context = "\n\n---\n\n".join(item["text"] for item in evidence)
+        chunks = ", ".join(str(item.get("chunk_index", 0) + 1) for item in evidence)
+        return context, f"{doc.get('filename', 'document')} chunks {chunks}"
+
+    try:
+        ctx_words = min(adaptive_strategy.detect_model()["context_max_words"], int(preset.get("max_context_words", 4200)))
+    except Exception:
+        ctx_words = int(preset.get("max_context_words", 4200))
+    context = build_balanced_context(doc.get("chunks", []), max_words=ctx_words, target_chunks=int(preset.get("top_k", 8)))
+    return context, f"{doc.get('filename', 'document')} balanced fallback"
+
+
+def make_audio_overview(session_state, doc_id, duration_label, synthesize_audio, voice_a, voice_b):
+    session_state = ensure_session_state(session_state)
+    library = get_library(session_state)
+    if not doc_id or doc_id not in library:
+        yield render_audio_status("⚠️ Select a Library document first.", ok=False), render_audio_empty(), None, None, None, session_state
+        return
+    if not is_lmstudio_online():
+        yield render_audio_status("🔴 LM Studio is offline. Open LM Studio, load a model, and start the local server.", ok=False), render_audio_empty(), None, None, None, session_state
+        return
+
+    doc = library[doc_id]
+    source_title = doc.get("filename", "Audio Overview").rsplit(".", 1)[0]
+    yield (
+        render_audio_status(f"⏳ Retrieving grounded context from {doc.get('filename', 'document')}…"),
+        render_audio_loading("Retrieving grounded context…"),
+        None,
+        None,
+        None,
+        session_state,
+    )
+
+    context, source_note = get_audio_context_for_doc(session_state, doc_id, duration_label)
+    if not context.strip():
+        yield render_audio_status("⚠️ Selected document has no usable text chunks.", ok=False), render_audio_empty(), None, None, None, session_state
+        return
+
+    yield (
+        render_audio_status(f"⏳ Writing staged two-host script…\nSource: {source_note}"),
+        render_audio_loading("Writing transcript…"),
+        None,
+        None,
+        None,
+        session_state,
+    )
+
+    result = generate_audio_overview_result(
+        source_title=source_title,
+        context=context,
+        duration_label=duration_label,
+        voice_a=voice_a,
+        voice_b=voice_b,
+        synthesize_audio=bool(synthesize_audio),
+    )
+    if not result.get("ok"):
+        note = result.get("note") or "Audio overview generation failed."
+        yield render_audio_status(f"❌ {note}", ok=False), render_audio_empty(), None, None, None, session_state
+        return
+
+    data = result.get("data", {})
+    script = data.get("script")
+    audio_path = data.get("audio_path") or None
+    transcript_path = data.get("transcript_md") or None
+    turns = result.get("counts", {}).get("turns", 0)
+    note = result.get("note", "")
+    status = f"✅ Audio overview ready · {turns} turns · Source: {source_note}"
+    if note:
+        status += f"\n{note}"
+    yield (
+        render_audio_status(status, ok=True),
+        render_transcript_html(script),
+        audio_path,
+        audio_path,
+        transcript_path,
+        session_state,
+    )
+
+
+# ── Coding Helpers ──────────────────────────────────────────────────────────
+
+def render_ca_empty_output() -> str:
+    return (
+        '<div style="background:#1e293b;border:2px dashed #334155;border-radius:16px;min-height:180px;'
+        'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;'
+        'font-family:\'Segoe UI\',sans-serif;">'
+        '<div style="font-size:36px;">⚡</div>'
+        '<div style="color:#64748b;font-size:14px;font-weight:600;">Load a file, pick a mode, and run</div>'
+        '</div>'
+    )
+
+
+def ca_load_file_fn(session_state, doc_id):
+    session_state = ensure_session_state(session_state)
+    library = get_library(session_state)
+    if not doc_id or doc_id not in library:
+        return render_code_empty_state(), "", "", "⚠️ Select a code file."
+    info = library[doc_id]
+    filename = info.get("filename", "")
+    code_text = info.get("code_text", "") or "\n".join(info.get("chunks", []))
+    if not code_text:
+        return render_code_empty_state(), "", filename, "⚠️ No code content found."
+    lang = get_language_from_filename(filename)
+    preview = syntax_highlight_html(code_text, lang, filename)
+    lines = len(code_text.split("\n"))
+    return preview, code_text, filename, f"✅ Loaded: {filename}  ({lines} lines)"
+
+
+def ca_switch_mode(mode: str):
+    def btn(active): return gr.update(variant="primary" if active else "secondary")
+    def col(active): return gr.update(visible=active)
+    return (
+        mode,
+        btn(mode == "explain"), btn(mode == "ask_ai"),
+        col(mode == "explain"), col(mode == "ask_ai"),
+    )
+
+
+def ca_run_explain_fn(code_text, filename):
+    if not code_text:
+        return '<div style="color:#f87171;padding:16px;font-family:\'Segoe UI\',sans-serif;">⚠️ Load a code file first.</div>'
+    return render_explain_html(explain_code(code_text, filename), filename)
+
+
+def ca_run_qa_fn(code_text, question, history):
+    history = list(history or [])
+    if not code_text:
+        return render_qa_history_html(history), history, ""
+    if not (question or "").strip():
+        return render_qa_history_html(history), history, ""
+    answer = qa_code(code_text, question, history)
+    history.append((question, answer))
+    return render_qa_history_html(history), history, ""
+
+
+def ca_clear_qa_fn():
+    return render_qa_history_html([]), []
+
+
 # ── CSS ───────────────────────────────────────────────────────────
 css = """
 html, body {
@@ -1380,7 +1607,7 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
     <div class="rk-subtitle">Your personal study companion</div>
   </div>
   <div class="rk-spacer"></div>
-  <div class="rk-badge">v1.2</div>
+  <div class="rk-badge">v1.3</div>
 </div>
 """)
 
@@ -1399,9 +1626,9 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
 
         # 1: Library
         with gr.Tab("📚 Library"):
-            gr.HTML('<div style="background:#0f172a;border:1px solid #1e293b;border-left:3px solid #4F46E5;border-radius:8px;padding:10px 16px;font-size:12.5px;color:#64748b;margin-bottom:4px;">📎 Supported: <strong style="color:#94a3b8;">PDF · DOCX · TXT · MD · PPTX · EPUB</strong> &nbsp;·&nbsp; Max 25 MB per file &nbsp;·&nbsp; All tabs update automatically after upload.</div>')
+            gr.HTML('<div style="background:#0f172a;border:1px solid #1e293b;border-left:3px solid #4F46E5;border-radius:8px;padding:10px 16px;font-size:12.5px;color:#64748b;margin-bottom:4px;">📎 Supported: <strong style="color:#94a3b8;">PDF · DOCX · TXT · MD · PPTX · EPUB · PY · JS · TS · C · CPP · JAVA · HTML · CSS</strong> &nbsp;·&nbsp; Max 25 MB per file &nbsp;·&nbsp; All tabs update automatically after upload.</div>')
             with gr.Row():
-                file_input = gr.File(label="Upload PDF, DOCX, TXT, MD, PPTX or EPUB", file_types=[".pdf",".docx",".txt",".md",".pptx",".epub"], file_count="multiple")
+                file_input = gr.File(label="Upload PDF, DOCX, TXT, MD, PPTX, EPUB or Code (.py .js .ts .c .cpp .java .html .css)", file_types=[".pdf",".docx",".txt",".md",".pptx",".epub",".py",".js",".ts",".c",".cpp",".java",".html",".css"], file_count="multiple")
                 upload_btn = gr.Button("Add to Library 📚", variant="primary", scale=0)
             upload_info    = gr.HTML("")
             gr.Markdown("---")
@@ -1433,7 +1660,7 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
         with gr.Tab("📝 Quiz"):
             quiz_doc_selector = gr.CheckboxGroup(label="📄 Select Documents", choices=[], value=[], interactive=True)
             with gr.Row():
-                num_q_slider    = gr.Slider(minimum=3, maximum=40, value=5, step=1, label="Questions", scale=3)
+                num_q_slider    = gr.Slider(minimum=3, maximum=30, value=5, step=1, label="Questions", scale=3)
                 quiz_difficulty = gr.Radio(DIFFICULTY_CHOICES, value="Medium", label="Difficulty", scale=3)
                 start_quiz_btn  = gr.Button("Generate Quiz 📝", variant="primary", scale=2)
             quiz_status   = gr.Textbox(label="Status", interactive=False, lines=1)
@@ -1474,7 +1701,7 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
         with gr.Tab("🃏 Flashcards"):
             fc_selector = gr.CheckboxGroup(label="📄 Select Documents", choices=[], value=[], interactive=True)
             with gr.Row():
-                num_cards_slider = gr.Slider(minimum=5, maximum=40, value=10, step=5, label="Cards", scale=3)
+                num_cards_slider = gr.Slider(minimum=5, maximum=30, value=10, step=5, label="Cards", scale=3)
                 fc_difficulty    = gr.Radio(DIFFICULTY_CHOICES, value="Medium", label="Difficulty", scale=3)
                 generate_btn     = gr.Button("Generate Flashcards 🃏", variant="primary", scale=2)
             fc_status         = gr.Textbox(label="Status", interactive=False, lines=1)
@@ -1526,6 +1753,140 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
                 inputs=[session_state, topic_input, mm_doc_selector],
                 outputs=[mm_status_html, mm_display, mm_file_out, session_state])
 
+        # 6: Audio Overview
+        with gr.Tab("🎙️ Audio"):
+            gr.HTML('<div style="background:#0f172a;border:1px solid #1e293b;border-left:3px solid #4F46E5;border-radius:8px;padding:10px 16px;font-size:12.5px;color:#64748b;margin-bottom:10px;">'
+                    '🎙️ <strong style="color:#94a3b8;">Audio Overview</strong> — Generate a grounded two-host study transcript and synthesize local audio when Piper voices are configured.</div>')
+
+            with gr.Row():
+                audio_doc_selector = gr.Dropdown(
+                    label="📄 Library Document",
+                    choices=[], value=None, interactive=True, scale=3,
+                )
+                audio_duration = gr.Radio(
+                    AUDIO_DURATION_CHOICES,
+                    value=DEFAULT_DURATION,
+                    label="Length",
+                    scale=2,
+                )
+                audio_generate_btn = gr.Button("Generate Audio 🎙️", variant="primary", scale=1)
+
+            with gr.Accordion("🎛️ Local Voice Setup", open=False):
+                audio_synthesize_check = gr.Checkbox(
+                    label="Synthesize with Piper if available",
+                    value=True,
+                    interactive=True,
+                )
+                with gr.Row():
+                    audio_voice_a = gr.Textbox(
+                        label="Host A voice (.onnx)",
+                        placeholder="Optional path or STUDYMIND_PIPER_VOICE_A",
+                        lines=1,
+                    )
+                    audio_voice_b = gr.Textbox(
+                        label="Host B voice (.onnx)",
+                        placeholder="Optional path or STUDYMIND_PIPER_VOICE_B",
+                        lines=1,
+                    )
+                gr.HTML('<div style="font-size:12px;color:#64748b;line-height:1.6;">Piper can also be configured with <code>STUDYMIND_PIPER_BIN</code>, <code>STUDYMIND_PIPER_VOICE_A</code>, and <code>STUDYMIND_PIPER_VOICE_B</code>. If audio is unavailable, StudyMind still exports the transcript.</div>')
+
+            audio_status_html = gr.HTML("")
+            with gr.Row():
+                audio_player = gr.Audio(label="Audio Overview", type="filepath", interactive=False, scale=2)
+                with gr.Column(scale=1):
+                    audio_file_out = gr.File(label="Audio File", interactive=False)
+                    audio_transcript_file = gr.File(label="Transcript", interactive=False)
+            audio_transcript_html = gr.HTML(value=render_audio_empty())
+
+            audio_generate_btn.click(
+                fn=make_audio_overview,
+                inputs=[session_state, audio_doc_selector, audio_duration, audio_synthesize_check, audio_voice_a, audio_voice_b],
+                outputs=[audio_status_html, audio_transcript_html, audio_player, audio_file_out, audio_transcript_file, session_state],
+            )
+
+        # 7: Coding
+        with gr.Tab("⚡ Coding"):
+            gr.HTML('<div style="background:#0f172a;border:1px solid #1e293b;border-left:3px solid #4F46E5;border-radius:8px;padding:10px 16px;font-size:12.5px;color:#64748b;margin-bottom:10px;">'
+                    '⚡ <strong style="color:#94a3b8;">Coding</strong> — Explain code or ask AI questions about loaded source files. '
+                    'Upload code files (<code>.py .js .ts .c .cpp .java .html .css</code>) to the 📚 Library tab first.</div>')
+
+            # Mode switcher
+            ca_mode_state = gr.State("explain")
+            with gr.Row():
+                ca_explain_btn = gr.Button("🔍 Explain", variant="primary",   size="sm", scale=1)
+                ca_qa_btn      = gr.Button("💬 Ask AI",   variant="secondary", size="sm", scale=1)
+
+            gr.HTML('<div style="border-top:1px solid #1e293b;margin:10px 0;"></div>')
+
+            # File picker (Library-sourced)
+            ca_file_selector = gr.Dropdown(
+                label="📁 Code File from Library",
+                choices=[], value=None, interactive=True,
+            )
+            with gr.Row():
+                ca_load_btn    = gr.Button("Load & Preview 📂", variant="secondary", size="sm", scale=0)
+                ca_load_status = gr.Textbox(label="", value="", interactive=False, lines=1, scale=4)
+            ca_code_preview = gr.HTML(value=render_code_empty_state())
+            ca_code_state   = gr.State("")
+            ca_fname_state  = gr.State("")
+
+            gr.HTML('<div style="border-top:1px solid #1e293b;margin:12px 0;"></div>')
+
+            # Explain section
+            with gr.Column(visible=True) as ca_explain_col:
+                ca_explain_run = gr.Button("🔍 Explain This Code", variant="primary")
+                ca_explain_out = gr.HTML(value=render_ca_empty_output())
+
+            # Ask AI section
+            with gr.Column(visible=False) as ca_qa_col:
+                ca_qa_state    = gr.State([])
+                ca_qa_hist_html = gr.HTML(value=render_qa_history_html([]))
+                with gr.Row():
+                    ca_qa_input = gr.Textbox(
+                        label="Ask a question about the code",
+                        placeholder="e.g. What does this function return? How does the loop work?",
+                        lines=2, scale=5,
+                    )
+                    ca_qa_run   = gr.Button("Ask 💬", variant="primary", scale=1)
+                ca_qa_clear_btn = gr.Button("Clear Chat 🗑️", variant="secondary", size="sm")
+
+            # ── Coding wiring ─────────────────────────────────────────────
+            _ca_mode_outs = [
+                ca_mode_state,
+                ca_explain_btn, ca_qa_btn,
+                ca_explain_col, ca_qa_col,
+                # outputs are NOT cleared on mode switch — spec: preserve loaded file and current output
+            ]
+            ca_explain_btn.click(fn=lambda: ca_switch_mode("explain"), outputs=_ca_mode_outs)
+            ca_qa_btn.click(     fn=lambda: ca_switch_mode("ask_ai"),  outputs=_ca_mode_outs)
+
+            # Load file
+            ca_load_btn.click(
+                fn=ca_load_file_fn,
+                inputs=[session_state, ca_file_selector],
+                outputs=[ca_code_preview, ca_code_state, ca_fname_state, ca_load_status],
+            )
+
+            # Explain
+            ca_explain_run.click(
+                fn=ca_run_explain_fn,
+                inputs=[ca_code_state, ca_fname_state],
+                outputs=[ca_explain_out],
+            )
+
+            # Ask AI
+            ca_qa_run.click(
+                fn=ca_run_qa_fn,
+                inputs=[ca_code_state, ca_qa_input, ca_qa_state],
+                outputs=[ca_qa_hist_html, ca_qa_state, ca_qa_input],
+            )
+            ca_qa_input.submit(
+                fn=ca_run_qa_fn,
+                inputs=[ca_code_state, ca_qa_input, ca_qa_state],
+                outputs=[ca_qa_hist_html, ca_qa_state, ca_qa_input],
+            )
+            ca_qa_clear_btn.click(fn=ca_clear_qa_fn, outputs=[ca_qa_hist_html, ca_qa_state])
+
     # ── Wiring ────────────────────────────────────────────────────
     refresh_home_btn.click(
         fn=refresh_home,
@@ -1534,11 +1895,13 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
     )
 
     lib_sync = [library_html, lib_doc_status, doc_selector,
-                quiz_doc_selector, fc_selector, mm_doc_selector, qa_status_html, session_state]
+                quiz_doc_selector, fc_selector, mm_doc_selector, audio_doc_selector,
+                qa_status_html, ca_file_selector, session_state]
 
     upload_btn.click(fn=load_files, inputs=[session_state, file_input],
         outputs=[upload_info, library_html, lib_doc_status, doc_selector,
-                 quiz_doc_selector, fc_selector, mm_doc_selector, qa_status_html, home_html, session_state])
+                 quiz_doc_selector, fc_selector, mm_doc_selector, audio_doc_selector,
+                 qa_status_html, ca_file_selector, home_html, session_state])
     set_active_btn.click(fn=switch_active_doc, inputs=[session_state, doc_selector], outputs=lib_sync)
     remove_btn.click(fn=delete_doc,            inputs=[session_state, doc_selector], outputs=lib_sync)
     refresh_btn.click(fn=refresh_library,      inputs=[session_state],               outputs=lib_sync)
