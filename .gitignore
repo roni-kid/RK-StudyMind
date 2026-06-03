@@ -23,7 +23,7 @@ exports/
 *.gguf
 *.bin
 
-# Security scan reports — too large for GitHub
+# Security scan reports
 bandit_report.json
 bandit_report.csv
 bandit_report.txt
@@ -58,3 +58,12 @@ desktop.ini
 
 # Codex config
 .codex
+
+# Project-internal docs — not for public repo
+memory.md
+CHANGELOG.md
+CLAUDE.md
+THEME_OVERHAUL.md
+
+# Local launcher — machine-specific
+Studymind.bat
