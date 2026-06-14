@@ -3,12 +3,10 @@ import os
 import re
 from datetime import datetime, timezone
 
+from modules.runtime_paths import data_dir
 
-HISTORY_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
-    "data",
-    "study_history.json",
-)
+
+HISTORY_PATH = data_dir() / "study_history.json"
 
 
 def _default_history() -> dict:
@@ -25,7 +23,7 @@ def _normalize_key(text: str) -> str:
 
 def load_study_history() -> dict:
     try:
-        if os.path.exists(HISTORY_PATH):
+        if HISTORY_PATH.exists():
             with open(HISTORY_PATH, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
                 default = _default_history()
@@ -39,7 +37,7 @@ def load_study_history() -> dict:
 
 def save_study_history(history: dict) -> None:
     try:
-        os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+        HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(HISTORY_PATH, "w", encoding="utf-8") as handle:
             json.dump(history, handle, indent=2)
     except Exception as exc:

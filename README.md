@@ -102,10 +102,17 @@ pip install pytesseract Pillow
 
 ### 5. (Optional) Enable Audio Overview Voice Synthesis
 
-The 🎙️ Audio tab always generates a transcript. To synthesize playable audio, install Piper separately and provide two local `.onnx` voices. You can either paste voice paths in the Audio tab or set environment variables before launching StudyMind:
+The 🎙️ Audio tab always generates a transcript. To synthesize playable audio, install Piper separately and put two local `.onnx` voices in `StudyMind\voices`. StudyMind automatically prefers `en_US-amy-medium.onnx` for Host A, then uses a second voice such as `en_GB-alan-medium.onnx` or `en_US-ryan-medium.onnx` for Host B.
+
+You still need to point StudyMind to `piper.exe` before launching:
 
 ```bash
 set STUDYMIND_PIPER_BIN=C:\path\to\piper.exe
+```
+
+Manual voice paths are optional overrides if you do not want folder auto-detection:
+
+```bash
 set STUDYMIND_PIPER_VOICE_A=C:\path\to\voice_a.onnx
 set STUDYMIND_PIPER_VOICE_B=C:\path\to\voice_b.onnx
 ```

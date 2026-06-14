@@ -3,11 +3,10 @@ import os
 import re
 from datetime import datetime
 
+from modules.runtime_paths import exports_dir
 
-EXPORT_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
-    "exports",
-)
+
+EXPORT_DIR = exports_dir()
 
 
 def _slugify(value: str) -> str:
@@ -16,9 +15,9 @@ def _slugify(value: str) -> str:
 
 
 def export_flashcards_csv(cards: list[dict], source_label: str, difficulty: str) -> str:
-    os.makedirs(EXPORT_DIR, exist_ok=True)
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(EXPORT_DIR, f"flashcards_{_slugify(source_label)}_{stamp}.csv")
+    path = EXPORT_DIR / f"flashcards_{_slugify(source_label)}_{stamp}.csv"
     with open(path, "w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.writer(handle)
         writer.writerow(["Front", "Back", "Source", "Difficulty", "Tags"])
@@ -36,10 +35,10 @@ def export_flashcards_csv(cards: list[dict], source_label: str, difficulty: str)
 
 def export_quiz_report(*, attempts: list[dict], score: int, total: int, sources: list[str],
                        difficulty: str, weak_topics: list[dict]) -> str:
-    os.makedirs(EXPORT_DIR, exist_ok=True)
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     label = sources[0] if len(sources) == 1 else f"{len(sources)}-docs"
-    path = os.path.join(EXPORT_DIR, f"quiz_report_{_slugify(label)}_{stamp}.md")
+    path = EXPORT_DIR / f"quiz_report_{_slugify(label)}_{stamp}.md"
 
     lines = [
         "# StudyMind Quiz Report",

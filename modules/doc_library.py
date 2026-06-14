@@ -2,12 +2,10 @@ import json
 import os
 import html as _html
 
+from modules.runtime_paths import data_dir
 
-LIBRARY_SNAPSHOT_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
-    "data",
-    "library.json",
-)
+
+LIBRARY_SNAPSHOT_PATH = data_dir() / "library.json"
 
 RK_SURFACE_1 = "var(--rk-surface-1, #1e293b)"
 RK_BORDER_STRONG = "var(--rk-border-strong, #334155)"
@@ -25,7 +23,7 @@ def save_library_snapshot(library: dict, active_doc_id: str = "") -> None:
     Omitting text keeps snapshot files small even for 150K-word documents.
     """
     try:
-        os.makedirs(os.path.dirname(LIBRARY_SNAPSHOT_PATH), exist_ok=True)
+        LIBRARY_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
         docs = []
         for doc_id, info in (library or {}).items():
             docs.append({
@@ -50,7 +48,7 @@ def save_library_snapshot(library: dict, active_doc_id: str = "") -> None:
 
 def load_library_snapshot() -> tuple[dict, str]:
     try:
-        if not os.path.exists(LIBRARY_SNAPSHOT_PATH):
+        if not LIBRARY_SNAPSHOT_PATH.exists():
             return {}, ""
         with open(LIBRARY_SNAPSHOT_PATH, "r", encoding="utf-8") as handle:
             payload = json.load(handle)

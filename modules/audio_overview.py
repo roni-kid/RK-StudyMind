@@ -14,8 +14,9 @@ from modules.ai_engine import ask_lmstudio
 from modules.structured_generation import clean_text, extract_json_value, make_result
 
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+ROOT_DIR = Path(__file__).resolve().parent.parent  # modules/ -> StudyMind/ root
 AUDIO_OUTPUT_DIR = ROOT_DIR / "exports" / "audio_overviews"
+PIPER_VOICE_DIR = ROOT_DIR / "voices"
 
 DURATION_PRESETS = {
     "Short (~4 min)": {
@@ -102,7 +103,11 @@ def generate_audio_overview_result(
         return script_result
 
     script = script_result["data"]["script"]
-    transcript_paths = save_transcript_files(script)
+    try:
+        transcript_paths = save_transcript_files(script)
+    except Exception as _exc:
+        print(f"[audio_overview] Could not save transcript files: {_exc}")
+        transcript_paths = {"json": "", "markdown": ""}
     audio_path = ""
     audio_note = ""
     audio_status = "skipped"
@@ -357,24 +362,24 @@ def render_transcript_html(script: dict | None) -> str:
         speaker = turn.get("speaker", "HOST_A")
         accent = "#818cf8" if speaker == "HOST_A" else "#22c55e"
         label = "Host A" if speaker == "HOST_A" else "Host B"
+        # html.escape handles { } in text safely; use f-strings (no .format) to avoid
+        # KeyError when transcript text contains literal braces (math, code, JSON).
+        safe_text = html.escape(turn.get("text", ""))
+        safe_label = html.escape(label)
         body.append(
-            '<div style="background:#0f172a;border:1px solid #1e293b;border-left:3px solid {accent};'
-            'border-radius:10px;padding:12px 14px;margin-bottom:10px;">'
-            '<div style="font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:{accent};margin-bottom:6px;">'
-            '{idx}. {label}</div>'
-            '<div style="color:#e2e8f0;font-size:14px;line-height:1.65;">{text}</div>'
-            '</div>'.format(
-                accent=accent,
-                idx=idx,
-                label=html.escape(label),
-                text=html.escape(turn.get("text", "")),
-            )
+            f'<div style="background:#0f172a;border:1px solid #1e293b;border-left:3px solid {accent};'
+            f'border-radius:10px;padding:12px 14px;margin-bottom:10px;">'
+            f'<div style="font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase;'
+            f'color:{accent};margin-bottom:6px;">{idx}. {safe_label}</div>'
+            f'<div style="color:#e2e8f0;font-size:14px;line-height:1.65;">{safe_text}</div>'
+            f'</div>'
         )
+    joined_body = "".join(body)
     return (
-        '<div style="font-family:\'Segoe UI\',sans-serif;background:#111827;border:1px solid #1e293b;'
-        'border-radius:14px;padding:16px;max-height:520px;overflow-y:auto;">'
-        '<div style="font-size:16px;font-weight:800;color:#f8fafc;margin-bottom:12px;">{title}</div>'
-        '{body}</div>'.format(title=title, body="".join(body))
+        f'<div style="font-family:\'Segoe UI\',sans-serif;background:#111827;border:1px solid #1e293b;'
+        f'border-radius:14px;padding:16px;max-height:520px;overflow-y:auto;">'
+        f'<div style="font-size:16px;font-weight:800;color:#f8fafc;margin-bottom:12px;">{title}</div>'
+        f'{joined_body}</div>'
     )
 
 
@@ -434,13 +439,15 @@ def synthesize_script_audio(script: dict, voice_a: str = "", voice_b: str = "") 
 def resolve_piper_config(voice_a: str = "", voice_b: str = "") -> dict:
     binary = os.environ.get("STUDYMIND_PIPER_BIN") or shutil.which("piper") or ""
     voice_a = voice_a or os.environ.get("STUDYMIND_PIPER_VOICE_A") or _first_existing_voice([
-        ROOT_DIR / "voices" / "en_US-amy-medium.onnx",
+        PIPER_VOICE_DIR / "en_US-amy-medium.onnx",
         ROOT_DIR / "data" / "piper" / "voices" / "host_a.onnx",
-    ])
+    ]) or _select_voice_from_folder(preferred_terms=["amy", "female"])
     voice_b = voice_b or os.environ.get("STUDYMIND_PIPER_VOICE_B") or _first_existing_voice([
-        ROOT_DIR / "voices" / "en_US-libritts-high.onnx",
+        PIPER_VOICE_DIR / "en_GB-alan-medium.onnx",
+        PIPER_VOICE_DIR / "en_US-ryan-medium.onnx",
+        PIPER_VOICE_DIR / "en_US-libritts-high.onnx",
         ROOT_DIR / "data" / "piper" / "voices" / "host_b.onnx",
-    ])
+    ]) or _select_voice_from_folder(preferred_terms=["alan", "ryan", "male"], exclude={voice_a})
 
     if not binary:
         return {"ok": False, "message": "Piper is not configured. Transcript was generated without audio."}
@@ -585,3 +592,21 @@ def _first_existing_voice(candidates: list[Path]) -> str:
         if path.exists():
             return str(path)
     return ""
+
+
+def _select_voice_from_folder(preferred_terms: list[str] | None = None, exclude: set[str] | None = None) -> str:
+    if not PIPER_VOICE_DIR.exists():
+        return ""
+
+    excluded = {str(Path(path).resolve()).lower() for path in (exclude or set()) if path}
+    voices = sorted(PIPER_VOICE_DIR.glob("*.onnx"), key=lambda path: path.name.lower())
+    candidates = [path for path in voices if str(path.resolve()).lower() not in excluded]
+    if not candidates:
+        return ""
+
+    terms = [term.lower() for term in (preferred_terms or [])]
+    for term in terms:
+        for path in candidates:
+            if term in path.name.lower():
+                return str(path)
+    return str(candidates[0])

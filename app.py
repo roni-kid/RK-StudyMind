@@ -6,6 +6,7 @@ import html as _html
 import re as _re
 from datetime import datetime
 import uuid
+import json
 
 sys.path.append(os.path.dirname(__file__))
 from modules.pdf_reader import read_file, get_page_count, get_page_label, chunk_text
@@ -421,8 +422,22 @@ def render_home_stats(session_state, ai_status: str = "") -> str:
     {feature_card("🗺️","Mindmap","Structured study tree")}
   </div>
   <div style="background:#1e293b;border:1px solid #334155;border-left:4px solid #4F46E5;border-radius:12px;padding:14px 18px;">
-    <div style="font-size:13px;color:#94a3b8;line-height:1.6;">{tip}</div>
+    <div id="rk-tip-text" style="font-size:13px;color:#94a3b8;line-height:1.6;transition:opacity 0.35s ease;">{tip}</div>
   </div>
+  <script>(function(){{
+    var tips={json.dumps(STUDY_TIPS)};
+    var el=document.getElementById('rk-tip-text');
+    if(!el)return;
+    if(window._rkTipTimer)clearInterval(window._rkTipTimer);
+    var idx={STUDY_TIPS.index(tip)};
+    window._rkTipTimer=setInterval(function(){{
+      idx=(idx+1)%tips.length;
+      el.style.opacity='0';
+      setTimeout(function(){{
+        if(document.getElementById('rk-tip-text')===el){{el.textContent=tips[idx];el.style.opacity='1';}}
+      }},350);
+    }},5000);
+  }})();</script>
 </div>"""
 
 
@@ -1333,6 +1348,7 @@ def render_audio_empty() -> str:
 
 def render_audio_loading(step: str) -> str:
     return (
+        '<style>@keyframes rk-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}</style>'
         '<div style="background:#111827;border:1px solid #312e81;border-radius:16px;min-height:220px;'
         'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;'
         'font-family:\'Segoe UI\',sans-serif;">'
@@ -1788,7 +1804,7 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
                         placeholder="Optional path or STUDYMIND_PIPER_VOICE_B",
                         lines=1,
                     )
-                gr.HTML('<div style="font-size:12px;color:#64748b;line-height:1.6;">Piper can also be configured with <code>STUDYMIND_PIPER_BIN</code>, <code>STUDYMIND_PIPER_VOICE_A</code>, and <code>STUDYMIND_PIPER_VOICE_B</code>. If audio is unavailable, StudyMind still exports the transcript.</div>')
+                gr.HTML('<div style="font-size:12px;color:#64748b;line-height:1.6;">Put Piper <code>.onnx</code> voices in <code>StudyMind\\voices</code> for automatic Host A/Host B selection. Manual paths and <code>STUDYMIND_PIPER_VOICE_A</code> / <code>STUDYMIND_PIPER_VOICE_B</code> still override folder detection. If audio is unavailable, StudyMind still exports the transcript.</div>')
 
             audio_status_html = gr.HTML("")
             with gr.Row():
