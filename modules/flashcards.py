@@ -50,6 +50,7 @@ def generate_flashcards_result(text: str = "", filename: str = "", num_cards: in
     used_legacy = False
     max_attempts = (requested // BATCH_SIZE + 2) * 3
     attempts = 0
+    consecutive_empty = 0  # tracks back-to-back batches that added nothing new
 
     while len(all_cards) < requested and attempts < max_attempts:
         remaining = requested - len(all_cards)
@@ -73,17 +74,32 @@ def generate_flashcards_result(text: str = "", filename: str = "", num_cards: in
             )
             used_legacy = True
 
+        old_count = len(all_cards)
         merged, dropped = _merge_cards(all_cards, raw_cards, requested)
         dropped_total += dropped
         all_cards = merged
+        added = len(all_cards) - old_count
         attempts += 1
+
+        # Stop early once most of the attempt budget is spent on batches that
+        # added nothing new (model stuck returning duplicates). Mirrors the
+        # quiz.py safeguard so a slow local model doesn't burn every remaining
+        # attempt on repeated LM Studio calls that can't produce fresh cards.
+        empty_exit_threshold = max(4, max_attempts - 2)
+        if added == 0:
+            consecutive_empty += 1
+            if consecutive_empty >= empty_exit_threshold:
+                print(f"[flashcards.py] {consecutive_empty} consecutive empty batches — stopping early")
+                break
+        else:
+            consecutive_empty = 0
 
     if not all_cards:
         return make_result(
             False,
             {"cards": []},
             "failed",
-            "Could not generate flashcards. Try a different document or model.",
+            "Could not generate any flashcards — try a different document or a larger/more capable model.",
             {"requested": requested, "returned": 0, "dropped": dropped_total},
         )
 
@@ -95,11 +111,15 @@ def generate_flashcards_result(text: str = "", filename: str = "", num_cards: in
     elif used_retry or dropped_total:
         status = "repaired"
 
+    note = note_for_status(status)
+    if status == "partial":
+        note = f"Only {len(all_cards)}/{requested} flashcards could be generated — the document may not have enough distinct content, or try a larger model."
+
     return make_result(
         True,
         {"cards": all_cards[:requested]},
         status,
-        note_for_status(status),
+        note,
         {"requested": requested, "returned": min(len(all_cards), requested), "dropped": dropped_total},
     )
 

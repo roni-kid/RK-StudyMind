@@ -68,9 +68,8 @@ def generate_quiz_result(text: str = "", chunks: list[str] | None = None,
             difficulty=difficulty,
             retry=attempts > 0,
         )
-        if attempts > 0:
-            used_retry = True
         if not batch:
+            used_retry = True  # JSON path failed on this attempt — flag for status
             batch = _generate_batch(
                 context=context,
                 num_q=to_gen,
@@ -95,28 +94,40 @@ def generate_quiz_result(text: str = "", chunks: list[str] | None = None,
         print(f"[quiz.py] Batch attempt {attempts+1}: got {len(batch)}, added {added}, total {len(all_questions)}/{requested}")
         attempts += 1
 
-        # Track consecutive empty batches and stop if two in a row
+        # Track consecutive empty batches and stop early only once most of the
+        # attempt budget is exhausted. Small local models frequently return
+        # duplicate-heavy batches for a few attempts in a row before recovering
+        # (especially past ~10 questions), so bailing after just 2 empty
+        # batches was cutting quizzes short well before max_attempts was hit.
+        empty_exit_threshold = max(4, max_attempts - 2)
         if added == 0:
             consecutive_empty += 1
-            if consecutive_empty >= 2:
-                print("[quiz.py] Two consecutive empty batches — stopping early")
+            if consecutive_empty >= empty_exit_threshold:
+                print(f"[quiz.py] {consecutive_empty} consecutive empty batches — stopping early")
                 break
         else:
             consecutive_empty = 0  # reset on any successful batch
 
     status = "clean"
-    if len(all_questions) < requested:
+    shortfall = requested - len(all_questions)
+    if shortfall > 0:
         status = "partial" if all_questions else "failed"
     elif used_legacy:
         status = "legacy_fallback"
     elif used_retry or dropped_total:
         status = "repaired"
 
+    note = note_for_status(status)
+    if status == "partial":
+        note = f"Only {len(all_questions)}/{requested} questions could be generated — the document may not have enough distinct content, or try a larger model."
+    elif status == "failed":
+        note = "Could not generate any questions — try a different document or a larger/more capable model."
+
     return make_result(
         bool(all_questions),
         {"questions": all_questions[:requested]},
         status,
-        note_for_status(status),
+        note,
         {"requested": requested, "returned": min(len(all_questions), requested), "dropped": dropped_total},
     )
 

@@ -25,7 +25,7 @@ _adaptive_model_info = initialize_adaptive_strategy()
 from modules.flashcards import generate_flashcards_result
 from modules.mindmap import generate_mindmap_tree_result, mindmap_to_html, save_mindmap_file
 from modules.quiz import generate_quiz_result
-from modules.doc_library import render_library_html, save_library_snapshot
+from modules.doc_library import render_library_html, save_library_snapshot, load_library_snapshot
 from modules.exporters import export_flashcards_csv, export_quiz_report
 from modules.study_context import build_balanced_context
 from modules.study_history import (
@@ -35,7 +35,11 @@ from modules.study_history import (
     get_hard_flashcards,
 )
 from modules.math_renderer import render_math, render_math_html
-from _splash_patch import SPLASH_JS as _SPLASH_JS, css as _SPLASH_CSS
+try:
+    from _splash_patch import SPLASH_JS as _SPLASH_JS, css as _SPLASH_CSS
+except ImportError:
+    _SPLASH_JS = ""   # _splash_patch.py is git-ignored; fresh clones fall back gracefully
+    _SPLASH_CSS = ""
 from modules.coding_agent import (
     explain_code, render_explain_html,
     qa_code, render_qa_history_html,
@@ -110,7 +114,29 @@ def new_session_state() -> dict:
 
 def ensure_session_state(session_state: dict | None) -> dict:
     if not isinstance(session_state, dict) or "session_id" not in session_state:
-        return new_session_state()
+        session_state = new_session_state()
+        try:
+            restored_library, restored_active_id = load_library_snapshot()
+        except Exception as e:
+            print(f"⚠️ Could not load library snapshot: {e}")
+            restored_library, restored_active_id = {}, ""
+        if restored_library:
+            session_state["library"] = restored_library
+            session_state["active_doc_id"] = restored_active_id
+            # library.json only holds chunks/metadata — this session's ChromaDB
+            # collection is ephemeral, so restored docs must be re-embedded now
+            # or Q&A/Quiz/Flashcards will silently search an empty collection.
+            for doc_id, info in restored_library.items():
+                try:
+                    index_chunks(
+                        info.get("chunks", []),
+                        doc_id=doc_id,
+                        filename=info.get("filename", ""),
+                        session_id=session_state["session_id"],
+                    )
+                except Exception as e:
+                    print(f"⚠️ Could not re-index restored doc '{info.get('filename', doc_id)}': {e}")
+        return session_state
     session_state.setdefault("library", {})
     session_state.setdefault("active_doc_id", "")
     session_state.setdefault("chat_log", [])
@@ -1576,9 +1602,13 @@ footer { display: none !important; }
 input[type="range"] { accent-color: #4F46E5 !important; }
 input[type="checkbox"], input[type="radio"] { accent-color: #4F46E5 !important; }
 #rk_chat_display {
-  max-height: 480px; overflow-y: auto; padding-right: 4px;
-  scrollbar-width: thin; scrollbar-color: #334155 #0f172a;
+  height: 500px; overflow-y: scroll; overflow-x: hidden; padding-right: 4px;
+  scrollbar-width: thin; scrollbar-color: #4F46E5 #0f172a;
 }
+#rk_chat_display::-webkit-scrollbar { width: 8px; }
+#rk_chat_display::-webkit-scrollbar-track { background: #0f172a; }
+#rk_chat_display::-webkit-scrollbar-thumb { background: #4F46E5; border-radius: 4px; }
+#rk_chat_display::-webkit-scrollbar-thumb:hover { background: #818cf8; }
 @keyframes rk-dot-bounce {
   0%,80%,100% { transform: translateY(0); opacity: .4; }
   40%          { transform: translateY(-7px); opacity: 1; }

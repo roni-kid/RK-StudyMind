@@ -48,7 +48,7 @@ _model_ready_evt = threading.Event()
 _preload_thread  = None
 _session_clients = {}
 _model_error     = None
-_session_lock    = threading.Lock()  # guards _session_clients for concurrent index calls
+_session_lock    = threading.RLock()  # guards _session_clients; RLock allows re-entry when drop_session is called from within get_or_create_collection
 
 
 # ── ChromaDB helpers ─────────────────────────────────────────────
@@ -123,9 +123,27 @@ def _embed_texts(texts: list) -> list:
             except Exception:
                 _embedding_model = _load_st_model(allow_download=True)
 
+    # Backend not yet resolved (preload still running) — wait for it, then
+    # re-dispatch rather than assuming sentence-transformers is the target.
+    # Without this re-check, a request landing during the preload window
+    # would wake up here, find _embed_backend already resolved to "lmstudio"
+    # (which never populates _embedding_model), and incorrectly raise below.
+    if _embed_backend is None:
+        _model_ready_evt.wait(timeout=60)
+
+    if _embed_backend == "lmstudio" and _embedding_model is None:
+        result = _lmstudio_embed(texts)
+        if result is not None:
+            return result
+        _log("⚠️ LM Studio embedding unavailable, switching to sentence-transformers")
+        _embed_backend = "sentence_transformers"
+
     # sentence-transformers path
     if _embedding_model is None:
-        _model_ready_evt.wait(timeout=60)
+        try:
+            _embedding_model = _load_st_model(allow_download=False)
+        except Exception:
+            _embedding_model = _load_st_model(allow_download=True)
     if _embedding_model is None:
         raise RuntimeError(
             _model_error or

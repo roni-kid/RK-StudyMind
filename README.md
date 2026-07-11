@@ -232,6 +232,8 @@ pip install -r requirements.txt
 
 ### ✅ Version 1.3 — Current
 - **Audio Overview tab** (`🎙️ Audio`) — selects a Library document, retrieves grounded chunks via semantic search, writes a validated two-host transcript with staged LM Studio prompting, and exports transcript plus optional Piper/ffmpeg audio
+
+### ✅ Version 1.2 — Current
 - **Coding tab** (`⚡ Coding`) — two modes: Explain (structured 6-section code breakdown rendered as HTML) and Ask AI (code Q&A with chat history and smart truncation). Supports `.py .js .ts .c .cpp .java .html .css` files uploaded via the Library
 - **File Profiler** (`file_profiler.py`) — pre-scan estimates word count and image ratio before full extraction; smart split/stretch logic automatically partitions oversized documents into indexed parts
 - **Structured Generation** (`structured_generation.py`) — shared JSON extraction, deduplication, and result envelope used across Quiz, Flashcards, Mindmap, and Audio modules
