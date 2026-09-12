@@ -1,0 +1,9 @@
+{
+  "max_file_size_mb": 25,
+  "max_doc_words": 150000,
+  "max_total_words": 400000,
+  "max_doc_chunks": 500,
+  "max_files_per_upload": 10,
+  "max_docs_per_session": 20,
+  "split_tolerance": 0.20
+}
