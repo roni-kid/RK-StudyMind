@@ -1,7 +1,26 @@
 # -*- mode: python ; coding: utf-8 -*-
 # StudyMind PyInstaller Spec — v1.3
 # Covers: Gradio 6.9, ChromaDB 1.5.5, sentence-transformers, PyMuPDF,
-#         python-docx, python-pptx, ebooklib, pytesseract, Pillow, pydub
+#         python-docx, python-pptx, ebooklib, pytesseract, Pillow, pywebview
+#
+# Entry point is launcher.py (pywebview desktop window), not app.py directly.
+# app.py still owns demo/build_launch_kwargs; launcher.py imports both and
+# starts Gradio on a background thread before opening the native window. See
+# launcher.py's own header comment for why the launch kwargs must come from
+# app.py rather than being reconstructed here.
+#
+# PYWEBVIEW / PYINSTALLER — UNVERIFIED, NEEDS A REAL BUILD PASS:
+# pywebview was not previously a dependency of this build. On Windows its
+# default backend is EdgeChromium (WebView2), which loads .NET assemblies at
+# runtime via clr_loader/pythonnet rather than through a traceable Python
+# import graph — the kind of dynamic loading PyInstaller's static analysis
+# is known to miss. pyinstaller-hooks-contrib (auto-installed alongside
+# PyInstaller) may already ship a maintained pywebview hook that handles
+# this; only 'webview' itself is added to hiddenimports below as a floor-
+# level safety net, not a confirmed-complete fix. Expect the first build to
+# surface a missing clr_loader/pythonnet/WebView2-runtime error, and treat
+# that error message as the source of truth for what to add here — don't
+# extend this list speculatively before that.
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
@@ -98,8 +117,16 @@ hidden = [
     'PIL.ImageFilter',
     'PIL.ImageEnhance',
 
-    # pydub (audio tab)
-    'pydub',
+    # NOTE: pydub was removed from this list — audio_overview.py uses stdlib
+    # wave + an ffmpeg subprocess, not pydub. pydub is still installed in the
+    # venv but nothing in this codebase imports it; adding it here would just
+    # bloat the bundle with an unused dependency. If a future feature starts
+    # using pydub, add it back.
+
+    # pywebview (native desktop window via launcher.py) — see the header
+    # comment above: this is a floor-level entry only, not confirmed
+    # sufficient on its own.
+    'webview',
 
     # Pygments (coding tab syntax highlighting)
     'pygments',
@@ -141,7 +168,7 @@ hidden = [
 ]
 
 a = Analysis(
-    ['app.py'],
+    ['launcher.py'],
     pathex=[],
     binaries=[],
     datas=all_datas,

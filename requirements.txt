@@ -9,3 +9,5 @@ ebooklib==0.20
 beautifulsoup4==4.14.3
 pytesseract==0.3.13
 Pillow==11.3.0
+pygments==2.21.0
+pywebview==6.2.1

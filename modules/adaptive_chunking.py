@@ -7,6 +7,8 @@ without requiring a manual Refresh.
 
 import time
 
+from modules.ai_engine import get_lmstudio_models, invalidate_model_cache
+
 
 class AdaptiveStrategy:
     """Computes optimal chunk size and context limits based on document and model."""
@@ -38,19 +40,39 @@ class AdaptiveStrategy:
             return self._cached_model_info
 
         try:
-            import requests
-            resp = requests.get("http://localhost:1234/v1/models", timeout=2)
-            data = resp.json()
-
-            if not data.get("data"):
+            models = get_lmstudio_models(force_refresh=True)
+            if not models.get("online"):
                 self._cached_model_info = self._fallback_strategy()
+                return self._cached_model_info
+
+            chat_models = models.get("chat", [])
+            if not chat_models:
+                # LM Studio is up but only an embedding model is loaded. Picking
+                # data[0] from /v1/models used to hand us the embedding model
+                # here, which meant the context window was inferred from
+                # "text-embedding-nomic-embed-text-v1.5" and chat completions
+                # would later be routed to a model that cannot generate.
+                info = self._fallback_strategy()
+                info["status"] = "⚠️ No chat model loaded in LM Studio"
+                self._cached_model_info = info
                 self._cache_timestamp = now
                 return self._cached_model_info
 
-            model_id = data["data"][0]["id"]
+            model = chat_models[0]
+            model_id = model["id"]
             self.model_name = model_id
 
-            context_tokens = self._infer_context_window(model_id)
+            # Prefer the context length LM Studio reports for the loaded model.
+            # The filename heuristic mapped every "qwen" to 32000 tokens, so a
+            # qwen3-4b loaded at 4096 was handed a 32k budget and the Coding tab
+            # shipped ~31k tokens into an 8k window.
+            reported = int(model.get("context_tokens") or 0)
+            if reported >= 1024:
+                context_tokens = reported
+                source = "reported"
+            else:
+                context_tokens = self._infer_context_window(model_id)
+                source = "estimated"
             self.model_context_tokens = context_tokens
 
             # Safe max words = 70% of context window (reserve for output + padding)
@@ -62,23 +84,29 @@ class AdaptiveStrategy:
                 "name": model_id,
                 "context_tokens": context_tokens,
                 "context_max_words": context_max_words,
+                "context_source": source,
                 "status": f"✅ Connected ({short_name})",
             }
             self._cache_timestamp = now
         except Exception:
             self._cached_model_info = self._fallback_strategy()
-            # Don't update timestamp on failure — retry sooner than TTL
-            # by leaving _cache_timestamp at its previous value so the
-            # next call re-attempts immediately after the except path.
+            # Don't update timestamp on failure — retry sooner than TTL by
+            # leaving _cache_timestamp at its previous value.
 
         return self._cached_model_info
 
     def _infer_context_window(self, model_id: str) -> int:
-        """Guess context window from model name (heuristic)."""
+        """
+        Fallback only. Used when LM Studio does not report a loaded context
+        length. Model families ship many context sizes and LM Studio lets the
+        user pick at load time, so these are deliberately conservative — an
+        underestimate costs a little context, an overestimate corrupts the
+        prompt by silently truncating the system message.
+        """
         m = model_id.lower()
 
         if "qwen" in m:
-            return 32000
+            return 8000
         if "mistral" in m:
             return 8000
         if "gemma" in m:
@@ -100,6 +128,7 @@ class AdaptiveStrategy:
             "name": "unknown",
             "context_tokens": 4000,
             "context_max_words": 2100,
+            "context_source": "fallback",
             "status": "⚠️ Using conservative defaults (LM Studio not detected)",
         }
 
@@ -107,6 +136,7 @@ class AdaptiveStrategy:
         """Force re-detection on next detect_model() call."""
         self._cached_model_info = None
         self._cache_timestamp = 0
+        invalidate_model_cache()
 
     # ─────────────────────────────────────────────────────────────────────────
     # STEP 2: Analyse document word count → compute chunk size

@@ -8,21 +8,20 @@ RoniKid — Level 100 Computer Engineering student. Building StudyMind: a locall
 ## Project Overview
 
 **Stack:** Python · Gradio · ChromaDB · LM Studio (local LLM, port 1234) · sentence-transformers
-**Supported formats:** PDF, DOCX, TXT, MD, PPTX, EPUB
-**Current version:** v1.1 in progress.
-**Overall completion:** ...
+**Supported formats:** PDF, DOCX, TXT, MD, PPTX, EPUB, and source code files (.py .js .ts .c .cpp .java .html .css)
+**Current version:** v1.3 (released)
 
 **Key paths:**
 | File | Purpose |
 |------|---------|
-| `C:\Users\rocks\Documents\Codex\StudyMind\app.py` | Main Gradio app |
+| `C:\Users\rocks\Documents\CLaude\StudyMind\app.py` | Main Gradio app — corrected from `Codex\StudyMind`, which is not where the codebase lives |
 | `modules\quiz.py` | Quiz generation logic |
 | `modules\flashcards.py` | Flashcard logic |
 | `modules\mindmap.py` | Mindmap logic |
 | `C:\Users\rocks\Documents\Codex\Memory\memory.md` | Session memory file |
 | `CHANGELOG.md` | Project changelog (maintain actively) |
 
-**Tab status (all v1.1 complete):** Home · Library · Q&A · Quiz · Flashcards · Mindmap
+**Tab status (v1.3):** Home · Library · Q&A · Quiz · Flashcards · Mindmap · Coding · Audio — all complete
 
 ---
 

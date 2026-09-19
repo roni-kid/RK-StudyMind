@@ -7,13 +7,27 @@ import re as _re
 from datetime import datetime
 import uuid
 import json
+import threading
 
 sys.path.append(os.path.dirname(__file__))
-from modules.pdf_reader import read_file, get_page_count, get_page_label, chunk_text
+
+# Console-safe output and writable runtime dirs must be set up before anything
+# else logs or writes. ensure_runtime_dirs() was previously dead code, and a
+# bare print of an emoji inside an except block on a cp1252 console raised
+# UnicodeEncodeError that replaced the original exception.
+from modules.runtime_paths import configure_stdio, ensure_runtime_dirs, log
+configure_stdio()
+ensure_runtime_dirs()
+
+from modules.pdf_reader import (
+    read_file, get_page_count, get_page_label, chunk_text,
+    CODE_EXTENSIONS, SUPPORTED_EXTENSIONS,
+    supported_extensions_display, code_extensions_display,
+)
 from modules.ai_engine import check_lmstudio_connection, is_lmstudio_online
 from modules.vector_store import (
     index_chunks, search_similar_chunks, preload_model_background,
-    clear_index, get_embed_backend
+    clear_index, get_embed_backend, EmbeddingMismatchError, reset_session_index,
 )
 from modules.engine_manager import ask, get_engine_status
 
@@ -25,7 +39,10 @@ _adaptive_model_info = initialize_adaptive_strategy()
 from modules.flashcards import generate_flashcards_result
 from modules.mindmap import generate_mindmap_tree_result, mindmap_to_html, save_mindmap_file
 from modules.quiz import generate_quiz_result
-from modules.doc_library import render_library_html, save_library_snapshot, load_library_snapshot
+from modules.doc_library import (
+    render_library_html, save_library_snapshot, load_library_snapshot,
+    load_code_text, save_code_text, delete_code_text,
+)
 from modules.exporters import export_flashcards_csv, export_quiz_report
 from modules.study_context import build_balanced_context
 from modules.study_history import (
@@ -34,7 +51,9 @@ from modules.study_history import (
     get_quiz_analytics,
     get_hard_flashcards,
 )
-from modules.math_renderer import render_math, render_math_html
+# render_plain_math_html is Pass 2. QA_SYSTEM_PROMPT asks the model for
+# plain-text math, and this is the only renderer that handles that format.
+from modules.math_renderer import render_math, render_math_html, render_plain_math_html
 try:
     from _splash_patch import SPLASH_JS as _SPLASH_JS, css as _SPLASH_CSS
 except ImportError:
@@ -81,7 +100,18 @@ MAX_FLASHCARDS = 30
 
 APP_VERSION = "v1.3"
 
-CODE_EXTENSIONS = {'.py', '.js', '.ts', '.c', '.cpp', '.java', '.html', '.css'}
+# Q&A answers were hard-capped at ask_lmstudio()'s 1024-token default because
+# engine_manager.ask() discarded max_tokens; long explanations truncated
+# mid-sentence.
+QA_MAX_TOKENS = 2048
+
+# Only the most recent turns are rendered. render_chat_bubbles() rebuilds the
+# entire history as one HTML blob on every turn, so an unbounded log is O(n^2)
+# string building plus an ever-growing payload to the browser.
+CHAT_RENDER_WINDOW = 40
+
+# CODE_EXTENSIONS / SUPPORTED_EXTENSIONS are imported from pdf_reader — see the
+# single-source-of-truth note there.
 
 
 def generation_status_note(result: dict) -> str:
@@ -112,30 +142,42 @@ def new_session_state() -> dict:
     }
 
 
+def _start_background_reindex(session_id: str, library: dict) -> None:
+    """Re-embed a restored library off the Gradio request thread."""
+    def _worker():
+        for doc_id, info in list(library.items()):
+            try:
+                index_chunks(
+                    info.get("chunks", []),
+                    doc_id=doc_id,
+                    filename=info.get("filename", ""),
+                    session_id=session_id,
+                )
+            except Exception as e:
+                log(f"⚠️ Could not re-index restored doc '{info.get('filename', doc_id)}': {e}")
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def ensure_session_state(session_state: dict | None) -> dict:
     if not isinstance(session_state, dict) or "session_id" not in session_state:
         session_state = new_session_state()
         try:
-            restored_library, restored_active_id = load_library_snapshot()
+            restored_library, restored_active_id, load_error = load_library_snapshot()
         except Exception as e:
-            print(f"⚠️ Could not load library snapshot: {e}")
-            restored_library, restored_active_id = {}, ""
+            log(f"⚠️ Could not load library snapshot: {e}")
+            restored_library, restored_active_id, load_error = {}, "", str(e)
+        session_state["library_load_error"] = load_error or ""
         if restored_library:
             session_state["library"] = restored_library
             session_state["active_doc_id"] = restored_active_id
             # library.json only holds chunks/metadata — this session's ChromaDB
-            # collection is ephemeral, so restored docs must be re-embedded now
-            # or Q&A/Quiz/Flashcards will silently search an empty collection.
-            for doc_id, info in restored_library.items():
-                try:
-                    index_chunks(
-                        info.get("chunks", []),
-                        doc_id=doc_id,
-                        filename=info.get("filename", ""),
-                        session_id=session_state["session_id"],
-                    )
-                except Exception as e:
-                    print(f"⚠️ Could not re-index restored doc '{info.get('filename', doc_id)}': {e}")
+            # collection is ephemeral, so restored docs must be re-embedded or
+            # Q&A/Quiz/Flashcards will silently search an empty collection.
+            #
+            # This runs on a background thread. Done inline it blocked the first
+            # interaction for minutes on a large library, with no spinner and no
+            # way out. Retrieval falls back to balanced context until it lands.
+            _start_background_reindex(session_state["session_id"], restored_library)
         return session_state
     session_state.setdefault("library", {})
     session_state.setdefault("active_doc_id", "")
@@ -250,11 +292,24 @@ def get_chunks_from_selection(selected_docs: list, session_state) -> list[str]:
     return chunks
 
 
-def persist_library(session_state) -> None:
-    save_library_snapshot(
+def persist_library(session_state) -> str:
+    """
+    Save the library snapshot and surface any write failure.
+
+    save_library_snapshot() returns a non-empty error string on failure (disk
+    full, permissions, bad path). Every call site used to discard that return
+    value, so a failed write — meaning the library the user just uploaded or
+    edited was NOT persisted — produced no log line and no UI signal. The
+    session still looked fine until the app restarted and the library was
+    simply gone.
+    """
+    error = save_library_snapshot(
         get_library(session_state),
         session_state.get("active_doc_id", ""),
     )
+    if error:
+        log(f"⚠️ persist_library failed — library not saved to disk: {error}")
+    return error or ""
 
 
 def render_quiz_analytics_html(session_state=None, title: str = "Weak Topic Analytics") -> str:
@@ -571,8 +626,7 @@ def load_files(session_state, files):
             f"⏳ Processing {index}/{total_files}: {fn}\n\n" + "\n".join(results or ["Preparing file…"]),
         )
 
-        if ext not in ['.pdf', '.docx', '.txt', '.md', '.pptx', '.epub',
-                       '.py', '.js', '.ts', '.c', '.cpp', '.java', '.html', '.css']:
+        if ext not in SUPPORTED_EXTENSIONS:
             results.append(f"❌ Skipped '{fn}': unsupported type")
             continue
 
@@ -655,8 +709,17 @@ def load_files(session_state, files):
                 "pages":      plan_pages,
                 "unit_label": plan_unit,
                 "words":      word_count,
-                "code_text":  plan_text if ext in CODE_EXTENSIONS else "",  # full text for Coding
+                # Source text is written to data/code/<doc_id>.txt and read on
+                # demand. Holding it here duplicated the whole file in session
+                # RAM and in library.json — the same snapshot-bloat bug that
+                # raw "text" was removed for. It cannot be rebuilt from chunks:
+                # chunk_text() splits on whitespace and rejoins with spaces,
+                # destroying every newline and all indentation.
+                "code_text":  "",
+                "is_code":    ext in CODE_EXTENSIONS,
             }
+            if ext in CODE_EXTENSIONS:
+                save_code_text(doc_id, plan_text)
 
             part_tag = f"part {split_idx}/{split_tot} — " if split_idx else ""
             yield make_upload_outputs(
@@ -715,6 +778,7 @@ def delete_doc(session_state, doc_id):
     library = get_library(session_state)
     if doc_id in library:
         clear_index(session_state["session_id"], doc_id)
+        delete_code_text(doc_id)
         del library[doc_id]
         if session_state.get("active_doc_id") == doc_id:
             remaining = get_all_doc_ids(session_state)
@@ -724,23 +788,51 @@ def delete_doc(session_state, doc_id):
 
 
 def refresh_library(session_state):
+    """
+    Refresh the Library view and rebuild the vector index.
+
+    This is the recovery path for EmbeddingMismatchError: if the embedding
+    backend changed mid-session, stored vectors are the wrong dimensionality
+    and re-indexing is what restores semantic search.
+    """
     session_state = ensure_session_state(session_state)
+    library = get_library(session_state)
+    if library:
+        try:
+            reset_session_index(session_state["session_id"])
+        except Exception as e:
+            log(f"⚠️ Could not reset vector index: {e}")
+        _start_background_reindex(session_state["session_id"], library)
     return (*get_library_outputs(session_state), session_state)
 
 # ── Q&A ───────────────────────────────────────────────────────────
 def format_ai_message(text: str) -> str:
+    """
+    Render a model answer as HTML.
+
+    SECURITY: everything is escaped FIRST, with no exceptions and no tag
+    detection. The previous implementation split on r'(<[^>]+>)' and passed
+    anything tag-shaped through raw, so a document that induced the model to
+    echo `<img src=x onerror=...>` got that tag executed in the Gradio page
+    origin — turning a study PDF into an exfiltration channel and breaking the
+    product's "nothing leaves your PC" guarantee.
+
+    Only the renderers below may introduce markup, and each emits a fixed,
+    known-safe set of tags into already-escaped text. Do not reintroduce any
+    step that trusts model output to be markup.
+    """
     if not text:
         return ""
+
+    # 1. Escape EVERYTHING. Nothing from the model survives as markup.
+    text = _html.escape(text)
+
+    # 2. Safe producers only, operating on escaped text.
+    #    Pass 2 is entity-aware because escaping has already turned ">=" into
+    #    "&gt;=" and "->" into "-&gt;".
     text = render_math_html(text)
-    def escape_non_tags(s):
-        result = []
-        for part in _re.split(r'(<[^>]+>)', s):
-            if part.startswith('<'):
-                result.append(part)
-            else:
-                result.append(_html.escape(part))
-        return ''.join(result)
-    text = escape_non_tags(text)
+    text = render_plain_math_html(text)
+
     FENCE = _re.compile(r'```(?:\w+)?\n?(.*?)```', _re.DOTALL)
     def rfence(m):
         code = m.group(1).strip()
@@ -768,6 +860,21 @@ def format_ai_message(text: str) -> str:
     return text
 
 
+def chat_entry_parts(entry):
+    """
+    Unpack a chat_log entry as (speaker, message, timestamp, source_note).
+
+    The source note used to be appended into the message string and split back
+    out with msg.rsplit("\n\n_", 1); any answer that happened to contain that
+    sequence mangled the bubble. It is now a separate field.
+    """
+    speaker = entry[0] if len(entry) > 0 else ""
+    msg     = entry[1] if len(entry) > 1 else ""
+    ts      = entry[2] if len(entry) > 2 else ""
+    source  = entry[3] if len(entry) > 3 else ""
+    return speaker, msg, ts, source
+
+
 def render_chat_bubbles(session_state):
     chat_log = session_state.get("chat_log", [])
     if not chat_log:
@@ -775,9 +882,12 @@ def render_chat_bubbles(session_state):
                 'font-family:\'Segoe UI\',sans-serif;color:#475569;font-size:15px;gap:10px;flex-direction:column;">'
                 '<div style="font-size:32px;">💬</div><div>Ask a question about your documents</div></div>')
     bubbles = ""
-    for entry in chat_log:
-        speaker, msg = entry[0], entry[1]
-        ts = entry[2] if len(entry) > 2 else ""
+    hidden = max(0, len(chat_log) - CHAT_RENDER_WINDOW)
+    if hidden:
+        bubbles += (f'<div style="text-align:center;margin-bottom:14px;font-size:11.5px;color:#475569;">'
+                    f'{hidden} earlier message(s) hidden — clear the chat to reset</div>')
+    for entry in chat_log[-CHAT_RENDER_WINDOW:]:
+        speaker, msg, ts, source_note = chat_entry_parts(entry)
         ts_html = (f'<div style="font-size:10.5px;color:#64748b;margin-top:5px;">{_html.escape(ts)}</div>') if ts else ""
         if speaker == "You":
             safe = _html.escape(msg).replace("\n","<br>")
@@ -786,16 +896,10 @@ def render_chat_bubbles(session_state):
                         f'border-radius:18px 18px 4px 18px;padding:13px 18px;font-size:14px;font-weight:500;'
                         f'line-height:1.65;box-shadow:0 4px 16px rgba(79,70,229,.35);">{safe}</div>{ts_html}</div>')
         else:
-            if "_[Source:" in msg or "_[Searched" in msg:
-                pts  = msg.rsplit("\n\n_", 1)
-                body = format_ai_message(pts[0])
-                src  = pts[1].strip("_") if len(pts) > 1 else ""
-                sbadge = (f'<div style="display:inline-flex;align-items:center;gap:5px;margin-top:10px;'
-                          f'background:#0f172a;border:1px solid #334155;border-radius:20px;padding:3px 10px;'
-                          f'font-size:11px;color:#94a3b8;">📎 {_html.escape(src)}</div>') if src else ""
-            else:
-                body   = format_ai_message(msg)
-                sbadge = ""
+            body = format_ai_message(msg)
+            sbadge = (f'<div style="display:inline-flex;align-items:center;gap:5px;margin-top:10px;'
+                      f'background:#0f172a;border:1px solid #334155;border-radius:20px;padding:3px 10px;'
+                      f'font-size:11px;color:#94a3b8;">📎 {_html.escape(source_note)}</div>') if source_note else ""
             bubbles += (f'<div style="display:flex;gap:10px;margin-bottom:18px;align-items:flex-start;">'
                         f'<div style="width:36px;height:36px;border-radius:12px;flex-shrink:0;'
                         f'background:linear-gradient(135deg,#312e81,#4F46E5);border:1px solid #4338ca;'
@@ -821,6 +925,104 @@ THINKING_BUBBLE = """<div style="display:flex;gap:10px;margin-bottom:18px;align-
 SCROLL_JS = """<script>(function(){var d=document.getElementById('rk_chat_inner');if(!d)return;
 d.scrollTop=d.scrollHeight;})();</script>"""
 
+# ── Audio Overview: native OS share (Web Share API, files only) ─────────────
+#
+# Stays fully offline: both files are fetched from this same localhost server
+# (the URLs gr.File already serves them at) and handed to the browser's own
+# navigator.share(), which opens the OS-native share sheet — nothing is
+# uploaded anywhere. This is why it is NOT gr.Audio(show_share_button=True):
+# that built-in button calls uploadToHuggingFace() and posts the file to
+# Hugging Face's public servers before sharing a link to it, which breaks the
+# "nothing leaves your PC" guarantee this app is built on.
+#
+# gr.File renders its current download as an <a href="..." download="...">
+# inside the component's elem_id container — that anchor's href is a stable,
+# public part of Gradio's file-serving contract across 4.x/5.x/6.x, so this
+# selector is scoped to only the two elem_ids below and fails with a clear
+# message rather than silently doing nothing if a future Gradio version
+# changes that markup.
+AUDIO_SHARE_JS = """
+async () => {
+  function statusHtml(msg, ok) {
+    var color = ok ? '#10b981' : '#ef4444';
+    return '<div style="background:#1e293b;border:1px solid ' + color + '33;border-left:4px solid ' + color +
+      ';border-radius:12px;padding:10px 16px;font-family:\\'Segoe UI\\',sans-serif;font-size:13px;color:#f1f5f9;">' +
+      msg + '</div>';
+  }
+
+  function findFile(elemId) {
+    var container = document.getElementById(elemId);
+    if (!container) return null;
+    var link = container.querySelector('a[href]');
+    return link || null;
+  }
+
+  if (!navigator.share || !navigator.canShare) {
+    return statusHtml('⚠️ Your browser does not support sharing files directly. Use the download buttons above instead.', false);
+  }
+
+  var audioLink = findFile('rk_audio_file_out');
+  var transcriptLink = findFile('rk_audio_transcript_file');
+
+  if (!audioLink && !transcriptLink) {
+    return statusHtml('⚠️ Generate an audio overview first — nothing to share yet.', false);
+  }
+
+  try {
+    var filesToShare = [];
+
+    if (audioLink) {
+      var audioResp = await fetch(audioLink.href);
+      if (!audioResp.ok) throw new Error('Could not read the audio file (' + audioResp.status + ')');
+      var audioBlob = await audioResp.blob();
+      var audioName = audioLink.getAttribute('download') || 'audio_overview.mp3';
+      filesToShare.push(new File([audioBlob], audioName, { type: audioBlob.type || 'audio/mpeg' }));
+    }
+
+    if (transcriptLink) {
+      var mdResp = await fetch(transcriptLink.href);
+      if (!mdResp.ok) throw new Error('Could not read the transcript file (' + mdResp.status + ')');
+      var mdBlob = await mdResp.blob();
+      var mdName = transcriptLink.getAttribute('download') || 'transcript.md';
+      filesToShare.push(new File([mdBlob], mdName, { type: mdBlob.type || 'text/markdown' }));
+    }
+
+    if (!navigator.canShare({ files: filesToShare })) {
+      return statusHtml('⚠️ Your browser cannot share these file types directly. Use the download buttons above instead.', false);
+    }
+
+    await navigator.share({
+      title: 'RK StudyMind Audio Overview',
+      files: filesToShare,
+    });
+    return statusHtml('✅ Shared.', true);
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      return '';
+    }
+    return statusHtml('⚠️ Share failed: ' + (err && err.message ? err.message : err), false);
+  }
+}
+"""
+
+def safe_search(warnings: list, **kwargs) -> list:
+    """
+    search_similar_chunks() with the embedding-mismatch signal preserved.
+
+    A backend switch mid-session (LM Studio dropping -> sentence-transformers)
+    changes the vector dimensionality, so stored vectors stop being comparable.
+    That used to surface as an empty result set and a quiet slide into balanced
+    context, with the user never learning retrieval was dead.
+    """
+    try:
+        return search_similar_chunks(**kwargs)
+    except EmbeddingMismatchError as exc:
+        message = str(exc)
+        if message not in warnings:
+            warnings.append(message)
+        return []
+
+
 def answer_question(session_state, question, chat_html, search_mode):
     session_state = ensure_session_state(session_state)
     chat_log = session_state["chat_log"]
@@ -840,8 +1042,10 @@ def answer_question(session_state, question, chat_html, search_mode):
         yield render_chat_bubbles(session_state) + SCROLL_JS, "", session_state
         return
     yield render_chat_bubbles(session_state) + THINKING_BUBBLE + SCROLL_JS, "", session_state
+    retrieval_warnings = []
     if search_mode == "🔍 Active Document Only":
-        evidence = search_similar_chunks(
+        evidence = safe_search(
+            retrieval_warnings,
             question=question,
             doc_id=active_doc["id"],
             session_id=session_state["session_id"],
@@ -860,7 +1064,8 @@ def answer_question(session_state, question, chat_html, search_mode):
         all_chunks = []
         source_parts = []
         for doc_id, info in library.items():
-            evidence = search_similar_chunks(
+            evidence = safe_search(
+                retrieval_warnings,
                 question=question,
                 doc_id=doc_id,
                 session_id=session_state["session_id"],
@@ -883,8 +1088,17 @@ def answer_question(session_state, question, chat_html, search_mode):
                 target_chunks=12,
             )
             source_note = f"Searched {len(library)} documents (balanced fallback)"
-    answer = ask(prompt=question, context=context)
-    chat_log.append(("RK StudyMind", f"{answer}\n\n_[{source_note}]_", datetime.now().strftime("%I:%M %p").lstrip("0")))
+    answer = ask(prompt=question, context=context, max_tokens=QA_MAX_TOKENS)
+    if retrieval_warnings:
+        answer = "⚠️ " + " ".join(retrieval_warnings) + "\n\n" + answer
+        source_note = f"{source_note} — semantic search unavailable"
+    # Source note travels as its own field, not appended to the message body.
+    chat_log.append((
+        "RK StudyMind",
+        answer,
+        datetime.now().strftime("%I:%M %p").lstrip("0"),
+        source_note,
+    ))
     yield render_chat_bubbles(session_state) + SCROLL_JS, "", session_state
 
 
@@ -1404,9 +1618,17 @@ def get_audio_context_for_doc(session_state, doc_id, duration_label):
             top_k=int(preset.get("top_k", 8)),
             include_metadata=True,
         )
+    except EmbeddingMismatchError as exc:
+        evidence = []
+        log(f"[audio_overview] embedding mismatch: {exc}")
+        return (
+            build_balanced_context(doc.get("chunks", []), target_chunks=int(preset.get("top_k", 8))),
+            f"{doc.get('filename', 'document')} — semantic search unavailable, "
+            "re-index from the Library tab",
+        )
     except Exception as exc:
         evidence = []
-        print(f"[audio_overview] retrieval failed, using balanced fallback: {exc}")
+        log(f"[audio_overview] retrieval failed, using balanced fallback: {exc}")
 
     if evidence:
         context = "\n\n---\n\n".join(item["text"] for item in evidence)
@@ -1508,9 +1730,12 @@ def ca_load_file_fn(session_state, doc_id):
         return render_code_empty_state(), "", "", "⚠️ Select a code file."
     info = library[doc_id]
     filename = info.get("filename", "")
-    code_text = info.get("code_text", "") or "\n".join(info.get("chunks", []))
+    # Never reconstruct from chunks — chunking destroys newlines and
+    # indentation and duplicates the overlap window.
+    code_text = load_code_text(info)
     if not code_text:
-        return render_code_empty_state(), "", filename, "⚠️ No code content found."
+        return (render_code_empty_state(), "", filename,
+                "⚠️ No source stored for this file — re-upload it in the Library tab.")
     lang = get_language_from_filename(filename)
     preview = syntax_highlight_html(code_text, lang, filename)
     lines = len(code_text.split("\n"))
@@ -1672,9 +1897,19 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
 
         # 1: Library
         with gr.Tab("📚 Library"):
-            gr.HTML('<div style="background:#0f172a;border:1px solid #1e293b;border-left:3px solid #4F46E5;border-radius:8px;padding:10px 16px;font-size:12.5px;color:#64748b;margin-bottom:4px;">📎 Supported: <strong style="color:#94a3b8;">PDF · DOCX · TXT · MD · PPTX · EPUB · PY · JS · TS · C · CPP · JAVA · HTML · CSS</strong> &nbsp;·&nbsp; Max 25 MB per file &nbsp;·&nbsp; All tabs update automatically after upload.</div>')
+            gr.HTML(
+                f'<div style="background:#0f172a;border:1px solid #1e293b;border-left:3px solid #4F46E5;'
+                f'border-radius:8px;padding:10px 16px;font-size:12.5px;color:#64748b;margin-bottom:4px;">'
+                f'📎 Supported: <strong style="color:#94a3b8;">{supported_extensions_display()}</strong>'
+                f' &nbsp;·&nbsp; Max {_config["max_file_size_mb"]} MB per file'
+                f' &nbsp;·&nbsp; All tabs update automatically after upload.</div>'
+            )
             with gr.Row():
-                file_input = gr.File(label="Upload PDF, DOCX, TXT, MD, PPTX, EPUB or Code (.py .js .ts .c .cpp .java .html .css)", file_types=[".pdf",".docx",".txt",".md",".pptx",".epub",".py",".js",".ts",".c",".cpp",".java",".html",".css"], file_count="multiple")
+                file_input = gr.File(
+                    label=f"Upload documents or code ({code_extensions_display()})",
+                    file_types=list(SUPPORTED_EXTENSIONS),
+                    file_count="multiple",
+                )
                 upload_btn = gr.Button("Add to Library 📚", variant="primary", scale=0)
             upload_info    = gr.HTML("")
             gr.Markdown("---")
@@ -1840,8 +2075,11 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
             with gr.Row():
                 audio_player = gr.Audio(label="Audio Overview", type="filepath", interactive=False, scale=2)
                 with gr.Column(scale=1):
-                    audio_file_out = gr.File(label="Audio File", interactive=False)
-                    audio_transcript_file = gr.File(label="Transcript", interactive=False)
+                    audio_file_out = gr.File(label="Audio File", interactive=False, elem_id="rk_audio_file_out")
+                    audio_transcript_file = gr.File(label="Transcript", interactive=False, elem_id="rk_audio_transcript_file")
+            with gr.Row():
+                audio_share_btn = gr.Button("Share 📤", variant="secondary", scale=0)
+            audio_share_status = gr.HTML("")
             audio_transcript_html = gr.HTML(value=render_audio_empty())
 
             audio_generate_btn.click(
@@ -1849,6 +2087,17 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
                 inputs=[session_state, audio_doc_selector, audio_duration, audio_synthesize_check, audio_voice_a, audio_voice_b],
                 outputs=[audio_status_html, audio_transcript_html, audio_player, audio_file_out, audio_transcript_file, session_state],
             )
+
+            # Client-side only — no Python round trip, no data ever leaves the
+            # PC. Reads the two gr.File components' current download links
+            # (elem_id-scoped so this never touches an unrelated file widget
+            # elsewhere in the app), fetches each as a same-origin
+            # (localhost) blob, and hands both to the OS's native share sheet
+            # via the Web Share API. This is deliberately NOT gr.Audio's
+            # built-in show_share_button — that button uploads the file to
+            # Hugging Face's public servers, which would break StudyMind's
+            # "nothing leaves your PC" guarantee.
+            audio_share_btn.click(fn=None, inputs=None, outputs=[audio_share_status], js=AUDIO_SHARE_JS)
 
         # 7: Coding
         with gr.Tab("⚡ Coding"):
@@ -1859,7 +2108,7 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
             # Mode switcher
             ca_mode_state = gr.State("explain")
             with gr.Row():
-                ca_explain_btn = gr.Button("🔍 Explain", variant="primary",   size="sm", scale=1)
+                ca_explain_btn = gr.Button("🔍 Analyse", variant="primary",   size="sm", scale=1)
                 ca_qa_btn      = gr.Button("💬 Ask AI",   variant="secondary", size="sm", scale=1)
 
             gr.HTML('<div style="border-top:1px solid #1e293b;margin:10px 0;"></div>')
@@ -1880,7 +2129,7 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
 
             # Explain section
             with gr.Column(visible=True) as ca_explain_col:
-                ca_explain_run = gr.Button("🔍 Explain This Code", variant="primary")
+                ca_explain_run = gr.Button("🔍 Analyse This Code", variant="primary")
                 ca_explain_out = gr.HTML(value=render_ca_empty_output())
 
             # Ask AI section
@@ -1953,6 +2202,31 @@ with gr.Blocks(title="🧠 RK StudyMind") as demo:
     refresh_btn.click(fn=refresh_library,      inputs=[session_state],               outputs=lib_sync)
 
 
+# ── Launch configuration ─────────────────────────────────────────
+#
+# Shared by `python app.py` and by launcher.py (pywebview). launcher.py used to
+# call demo.launch() with its own arguments, which silently dropped css, js and
+# theme — the desktop window, i.e. the packaging path toward .exe, rendered the
+# app completely unstyled.
+#
+# Hardening: share is never enabled — a public Gradio tunnel would contradict
+# the offline guarantee. show_api was dropped from Blocks.launch()'s accepted
+# kwargs in Gradio 6.0 (TypeError: unexpected keyword argument 'show_api');
+# the API surface is controlled elsewhere in 6.x, so it's just removed here.
+LAUNCH_KWARGS = dict(
+    theme=gr.themes.Soft(),
+    css=_COMBINED_CSS,
+    js=_SPLASH_JS,
+    share=False,
+)
+
+
+def build_launch_kwargs(**overrides) -> dict:
+    kwargs = dict(LAUNCH_KWARGS)
+    kwargs.update(overrides)
+    return kwargs
+
+
 if __name__ == "__main__":
     demo.queue()
-    demo.launch(inbrowser=True, theme=gr.themes.Soft(), css=_COMBINED_CSS, js=_SPLASH_JS)
+    demo.launch(**build_launch_kwargs(inbrowser=True))

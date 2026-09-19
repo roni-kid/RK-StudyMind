@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -29,8 +30,11 @@ class StructuredGenerationTests(unittest.TestCase):
         import modules.doc_library as doc_library
 
         original_path = doc_library.LIBRARY_SNAPSHOT_PATH
+        original_sidecar_path = doc_library.code_sidecar_path
         with tempfile.TemporaryDirectory() as tmp:
-            doc_library.LIBRARY_SNAPSHOT_PATH = os.path.join(tmp, "library.json")
+            temp_root = Path(tmp)
+            doc_library.LIBRARY_SNAPSHOT_PATH = temp_root / "library.json"
+            doc_library.code_sidecar_path = lambda doc_id: temp_root / "code" / f"{doc_id}.txt"
             try:
                 doc_library.save_library_snapshot({
                     "abc": {
@@ -43,12 +47,16 @@ class StructuredGenerationTests(unittest.TestCase):
                         "code_text": "def x():\n    pass",
                     }
                 }, "abc")
-                library, active = doc_library.load_library_snapshot()
+                library, active, error = doc_library.load_library_snapshot()
+                loaded_code = doc_library.load_code_text(library["abc"])
             finally:
                 doc_library.LIBRARY_SNAPSHOT_PATH = original_path
+                doc_library.code_sidecar_path = original_sidecar_path
 
         self.assertEqual(active, "abc")
-        self.assertEqual(library["abc"]["code_text"], "def x():\n    pass")
+        self.assertEqual(error, "")
+        self.assertEqual(library["abc"]["code_text"], "")
+        self.assertEqual(loaded_code, "def x():\n    pass")
 
     def test_mindmap_builds_tree_from_unordered_concepts(self):
         from modules.mindmap import build_mindmap_tree

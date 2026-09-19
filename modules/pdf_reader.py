@@ -1,14 +1,109 @@
 import os
 import re
+import zipfile
+
 import fitz  # PyMuPDF
+
+from modules.runtime_paths import log
 
 # =============================================
 # 📄 Document Reader Module
 # Supports: PDF, DOCX, TXT, MD, PPTX, EPUB, and source code files
+#
+# SINGLE SOURCE OF TRUTH for supported file types. app.py, the Gradio file
+# picker and the Library banner all import from here — the extension set used
+# to be duplicated in five places, so adding a format meant five edits and
+# missing one produced an accept-then-fail path.
 # =============================================
 
+DOCUMENT_EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".pptx", ".epub"]
 CODE_EXTENSIONS = {".py", ".js", ".ts", ".c", ".cpp", ".java", ".html", ".css"}
-SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".pptx", ".epub", *sorted(CODE_EXTENSIONS)]
+SUPPORTED_EXTENSIONS = [*DOCUMENT_EXTENSIONS, *sorted(CODE_EXTENSIONS)]
+
+# Zip-based container formats.
+ZIP_CONTAINER_EXTENSIONS = {".docx", ".pptx", ".epub"}
+
+
+def supported_extensions_display() -> str:
+    """Upper-case, separator-joined list for UI copy."""
+    return " · ".join(ext.lstrip(".").upper() for ext in SUPPORTED_EXTENSIONS)
+
+
+def code_extensions_display() -> str:
+    return " ".join(sorted(CODE_EXTENSIONS))
+
+
+# ── Container safety ────────────────────────────────────────────────
+#
+# DOCX/PPTX/EPUB are ZIP archives. The upload size cap applies to the
+# COMPRESSED file, so a crafted 25MB archive can expand to many gigabytes
+# inside python-docx / python-pptx / ebooklib — all of which read fully into
+# memory. Separately, ebooklib hands OPF/NCX to lxml, so an untrusted EPUB can
+# carry an entity-expansion payload. Both are checked before any parser runs.
+
+MAX_UNCOMPRESSED_BYTES = 400 * 1024 * 1024   # 400 MB expanded
+MAX_COMPRESSION_RATIO = 120                  # expanded : compressed
+MAX_ARCHIVE_MEMBERS = 5000
+
+_XML_MEMBER_SUFFIXES = (".xml", ".opf", ".ncx", ".rels", ".xhtml", ".html", ".htm")
+_XML_SNIFF_BYTES = 65536
+
+# A bare "<!DOCTYPE html>" is normal and harmless in EPUB XHTML. The danger is
+# an internal subset (a "[" before the closing ">") or any entity declaration.
+_ENTITY_DECL = re.compile(rb'<!ENTITY', re.IGNORECASE)
+_DOCTYPE_SUBSET = re.compile(rb'<!DOCTYPE[^>\[]*\[', re.IGNORECASE)
+
+
+def check_zip_container(file_path: str) -> str:
+    """
+    Validate a zip-based document before parsing it.
+    Returns "" if safe, otherwise a user-facing error string.
+    """
+    try:
+        compressed = max(1, os.path.getsize(file_path))
+    except OSError:
+        compressed = 1
+
+    try:
+        with zipfile.ZipFile(file_path) as archive:
+            infos = archive.infolist()
+
+            if len(infos) > MAX_ARCHIVE_MEMBERS:
+                return (f"❌ Rejected: archive contains {len(infos):,} entries "
+                        f"(limit {MAX_ARCHIVE_MEMBERS:,}). This file looks malformed or hostile.")
+
+            total = 0
+            for info in infos:
+                total += int(info.file_size or 0)
+                if total > MAX_UNCOMPRESSED_BYTES:
+                    return (f"❌ Rejected: contents expand to over "
+                            f"{MAX_UNCOMPRESSED_BYTES // (1024 * 1024)} MB. "
+                            "This is characteristic of a decompression bomb.")
+
+            ratio = total / compressed
+            if ratio > MAX_COMPRESSION_RATIO and total > 32 * 1024 * 1024:
+                return (f"❌ Rejected: compression ratio {ratio:.0f}:1 exceeds the "
+                        f"{MAX_COMPRESSION_RATIO}:1 limit. This is characteristic of a "
+                        "decompression bomb.")
+
+            for info in infos:
+                name = info.filename.lower()
+                if not name.endswith(_XML_MEMBER_SUFFIXES):
+                    continue
+                try:
+                    with archive.open(info) as member:
+                        head = member.read(_XML_SNIFF_BYTES)
+                except Exception:
+                    continue
+                if _ENTITY_DECL.search(head) or _DOCTYPE_SUBSET.search(head):
+                    return ("❌ Rejected: this file declares XML entities, which can be used "
+                            "for entity-expansion attacks. StudyMind will not parse it.")
+    except zipfile.BadZipFile:
+        return "❌ This file is not a readable DOCX/PPTX/EPUB archive (bad or corrupt zip)."
+    except Exception as exc:
+        log(f"[pdf_reader] Container inspection failed for '{file_path}': {exc}")
+        return f"❌ Could not inspect this file safely: {exc}"
+    return ""
 
 
 def _has_meaningful_text(text: str, threshold: int = 24) -> bool:
@@ -40,7 +135,7 @@ def _setup_tesseract() -> bool:
             for path in candidate_paths:
                 if os.path.isfile(path):
                     pytesseract.pytesseract.tesseract_cmd = path
-                    print(f"[OCR] Tesseract found at: {path}")
+                    log(f"[OCR] Tesseract found at: {path}")
                     break
 
         pytesseract.get_tesseract_version()
@@ -78,7 +173,7 @@ def _ocr_page(page) -> str:
     except pytesseract.pytesseract.TesseractNotFoundError:
         return ""
     except Exception as e:
-        print(f"[OCR] Page error: {e}")
+        log(f"[OCR] Page error: {e}")
         return ""
 
 
@@ -98,6 +193,12 @@ def read_file(file_path: str) -> str:
     Supports .pdf, .docx, .txt, .md, .pptx, .epub, and source code files.
     """
     ext = os.path.splitext(file_path)[1].lower()
+
+    if ext in ZIP_CONTAINER_EXTENSIONS:
+        problem = check_zip_container(file_path)
+        if problem:
+            return problem
+
     if ext == ".pdf":
         return read_pdf(file_path)
     elif ext == ".docx":
@@ -354,6 +455,14 @@ def get_page_count(file_path: str) -> int:
     TXT/MD/source code → estimated pages (~300 words each)
     """
     ext = os.path.splitext(file_path)[1].lower()
+
+    # This runs before read_file() in the upload pipeline and fully parses the
+    # archive, so the container guard has to apply here too. Returning 0 means
+    # "unknown units"; read_file() then reports the real reason and the upload
+    # is skipped with a visible message.
+    if ext in ZIP_CONTAINER_EXTENSIONS and check_zip_container(file_path):
+        return 0
+
     if ext == ".pdf":
         try:
             doc = fitz.open(file_path)

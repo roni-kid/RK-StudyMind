@@ -2,10 +2,73 @@ import json
 import os
 import html as _html
 
-from modules.runtime_paths import data_dir
+from modules.runtime_paths import (
+    atomic_write_json,
+    code_dir,
+    data_dir,
+    log,
+    read_json_with_recovery,
+)
 
 
 LIBRARY_SNAPSHOT_PATH = data_dir() / "library.json"
+
+
+# ── Code sidecar storage ─────────────────────────────────────
+#
+# Raw `text` was removed from the snapshot because a 150K-word document
+# produced ~900KB of JSON. `code_text` then reintroduced exactly that bug for
+# source files: full text held in RAM for the whole session AND written into
+# library.json on every save. Chunking destroys indentation and duplicates the
+# overlap, so it cannot be reconstructed from chunks — the text is instead
+# written once to data/code/<doc_id>.txt and read back on demand.
+
+def code_sidecar_path(doc_id: str):
+    return code_dir() / f"{doc_id}.txt"
+
+
+def save_code_text(doc_id: str, code_text: str) -> str:
+    """Persist a code file's full source. Returns "" if nothing was written."""
+    if not code_text:
+        return ""
+    try:
+        path = code_sidecar_path(doc_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(code_text)
+        return str(path)
+    except Exception as exc:
+        log(f"⚠️ Could not store code text for {doc_id}: {exc}")
+        return ""
+
+
+def load_code_text(info: dict) -> str:
+    """Read a code file's source back from its sidecar. "" if unavailable."""
+    if not isinstance(info, dict):
+        return ""
+    inline = info.get("code_text") or ""
+    if inline:
+        return inline
+    doc_id = info.get("id") or ""
+    if not doc_id:
+        return ""
+    try:
+        path = code_sidecar_path(doc_id)
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as handle:
+                return handle.read()
+    except Exception as exc:
+        log(f"⚠️ Could not read code text for {doc_id}: {exc}")
+    return ""
+
+
+def delete_code_text(doc_id: str) -> None:
+    try:
+        path = code_sidecar_path(doc_id)
+        if path.exists():
+            path.unlink()
+    except Exception as exc:
+        log(f"⚠️ Could not delete code text for {doc_id}: {exc}")
 
 RK_SURFACE_1 = "var(--rk-surface-1, #1e293b)"
 RK_BORDER_STRONG = "var(--rk-border-strong, #334155)"
@@ -16,17 +79,22 @@ RK_PRIMARY = "var(--rk-primary, #4F46E5)"
 RK_PRIMARY_SOFT = "var(--rk-primary-soft, #818cf8)"
 
 
-def save_library_snapshot(library: dict, active_doc_id: str = "") -> None:
+def save_library_snapshot(library: dict, active_doc_id: str = "") -> str:
     """
     Persist the library to disk. Raw document text is intentionally excluded —
     chunks already contain all the content needed to re-index and answer questions.
-    Omitting text keeps snapshot files small even for 150K-word documents.
+    Code source is stored in a sidecar file rather than inline (see above).
+
+    Written atomically: open(path, "w") truncates the target first, so a crash
+    or full disk mid-dump previously left a truncated library.json that the
+    loader silently discarded, taking the whole library with it.
+
+    Returns "" on success, or a human-readable error for the UI.
     """
     try:
-        LIBRARY_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
         docs = []
         for doc_id, info in (library or {}).items():
-            docs.append({
+            entry = {
                 "id":         doc_id,
                 "filename":   info.get("filename", ""),
                 # "text" deliberately omitted — not needed after indexing
@@ -34,24 +102,40 @@ def save_library_snapshot(library: dict, active_doc_id: str = "") -> None:
                 "pages":      info.get("pages", 0),
                 "unit_label": info.get("unit_label", "pages"),
                 "words":      info.get("words", 0),
-                "code_text":  info.get("code_text", ""),
-            })
+                "is_code":    bool(info.get("is_code") or info.get("code_text")),
+            }
+            # Migration path: an entry still carrying inline code_text from an
+            # older snapshot gets flushed to its sidecar on the next save.
+            inline_code = info.get("code_text") or ""
+            if inline_code:
+                save_code_text(doc_id, inline_code)
+            docs.append(entry)
+
         payload = {
             "active_doc_id": active_doc_id or "",
             "docs": docs,
         }
-        with open(LIBRARY_SNAPSHOT_PATH, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
+        atomic_write_json(LIBRARY_SNAPSHOT_PATH, payload)
+        return ""
     except Exception as exc:
-        print(f"⚠️ Could not save library snapshot: {exc}")
+        log(f"⚠️ Could not save library snapshot: {exc}")
+        return f"Library could not be saved to disk: {exc}"
 
 
-def load_library_snapshot() -> tuple[dict, str]:
+def load_library_snapshot() -> tuple[dict, str, str]:
+    """
+    Returns (library, active_doc_id, error_message).
+
+    error_message is "" on a clean load. It is non-empty when library.json was
+    unreadable — previously that case returned an empty library and only
+    printed to a console nobody reads, so a corrupt snapshot looked identical
+    to a fresh install.
+    """
+    payload, error = read_json_with_recovery(LIBRARY_SNAPSHOT_PATH, default=None)
+    if payload is None:
+        return {}, "", error
+
     try:
-        if not LIBRARY_SNAPSHOT_PATH.exists():
-            return {}, ""
-        with open(LIBRARY_SNAPSHOT_PATH, "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
         library = {}
         for item in payload.get("docs", []):
             doc_id = item.get("id")
@@ -65,15 +149,22 @@ def load_library_snapshot() -> tuple[dict, str]:
                 "pages":      item.get("pages", 0),
                 "unit_label": item.get("unit_label", "pages"),
                 "words":      item.get("words", 0),
-                "code_text":  item.get("code_text", ""),
+                # Read from the sidecar on demand, never held in session RAM.
+                "code_text":  "",
+                "is_code":    bool(item.get("is_code") or item.get("code_text")),
             }
+            # Legacy snapshots stored the source inline; migrate it out.
+            legacy_code = item.get("code_text") or ""
+            if legacy_code:
+                save_code_text(doc_id, legacy_code)
+
         active_doc_id = payload.get("active_doc_id", "")
         if active_doc_id not in library and library:
             active_doc_id = next(iter(library))
-        return library, active_doc_id
+        return library, active_doc_id, error
     except Exception as exc:
-        print(f"⚠️ Could not load library snapshot: {exc}")
-        return {}, ""
+        log(f"⚠️ Could not load library snapshot: {exc}")
+        return {}, "", f"Library snapshot could not be read ({exc})."
 
 
 def render_library_html(lib: dict = None, active_doc_id: str = None) -> str:

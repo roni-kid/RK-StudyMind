@@ -4,16 +4,26 @@ Two modes: Explain and Ask AI.
 Powered by local LM Studio. Smart truncation adapts to loaded model context window.
 """
 import json, re, html as _html
-from modules.ai_engine import ask_lmstudio, is_lmstudio_online
+from modules.ai_engine import ask_lmstudio, is_lmstudio_online, is_lmstudio_error
+from modules.runtime_paths import log
+from modules.structured_generation import untrusted_document_block
 
 
 # ── Context limit ─────────────────────────────────────────────────────────────
 
 def get_context_limit() -> int:
-    """Return token limit from adaptive strategy, fallback 2048."""
+    """
+    Token limit for code context, from the adaptive strategy (fallback 2048).
+
+    adaptive_chunking now reports the context length LM Studio actually loaded
+    the model with rather than guessing from the filename, so this no longer
+    hands smart_truncate() a 32000-token budget for a model loaded at 4096 —
+    which used to push ~31k tokens at an 8k window, evict the system prompt and
+    return garbage that failed JSON parsing.
+    """
     try:
         from modules.adaptive_chunking import adaptive_strategy
-        return adaptive_strategy.detect_model().get("context_tokens", 2048)
+        return int(adaptive_strategy.detect_model().get("context_tokens") or 2048)
     except Exception:
         return 2048
 
@@ -79,8 +89,17 @@ def explain_code(code_text: str, filename: str = "") -> dict:
     if not is_lmstudio_online():
         return {"error": "🔴 LM Studio is offline. Open LM Studio and start the server."}
     code, truncated = smart_truncate(code_text, get_context_limit())
-    prompt = f"Filename: {filename}\n\nCode:\n```\n{code}\n```\n\nAnalyze and return the JSON."
+    prompt = (
+        f"Filename: {filename}\n\n"
+        f"{untrusted_document_block(code)}\n\n"
+        "Analyze the source above and return the JSON."
+    )
     raw = ask_lmstudio(prompt=prompt, system_prompt=_EXPLAIN_SYSTEM, temperature=0.1)
+    if is_lmstudio_error(raw):
+        # A transport error is not unparseable model output; say so plainly
+        # instead of blaming the model's capability.
+        log(f"[coding_agent] Explain aborted — LM Studio transport error: {raw}")
+        return {"error": str(raw).strip()}
     raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
         return {"data": json.loads(raw), "truncated": truncated}
@@ -184,8 +203,16 @@ def qa_code(code_text: str, question: str, history: list = None) -> str:
     hist_text = ""
     for q, a in (history or [])[-3:]:
         hist_text += f"\n\nPrevious Q: {q}\nPrevious A: {a}"
-    context = f"SOURCE CODE:\n```\n{code}\n```{hist_text}"
-    return ask_lmstudio(prompt=question, context=context, system_prompt=_QA_SYSTEM, temperature=0.4)
+    context = f"SOURCE CODE:\n{code}\n{hist_text}"
+    raw = ask_lmstudio(prompt=question, context=context, system_prompt=_QA_SYSTEM, temperature=0.4)
+    if is_lmstudio_error(raw):
+        # Unlike explain_code(), this used to return the raw transport-error
+        # sentinel as if it were a real answer. It got pushed straight into
+        # the Ask AI chat history and rendered as an assistant reply, so a
+        # dropped connection or timeout mid-conversation permanently poisoned
+        # that session's transcript with a fake answer.
+        log(f"[coding_agent] Ask AI aborted — LM Studio transport error: {raw}")
+    return raw
 
 
 def render_qa_history_html(history: list) -> str:

@@ -198,6 +198,160 @@ def render_math(text):
     return text
 
 
+# -----------------------------------------------------------------
+# PASS 2 -- plain-text math rendering
+#
+# QA_SYSTEM_PROMPT tells the model to write math naturally (x^2, sqrt(x),
+# 1/2, ->, spelled-out Greek names) rather than in LaTeX. Pass 1 only handles
+# LaTeX delimiters, so Pass 2 is the ONLY thing that renders the format the
+# prompt actually asks for. It has now been deleted twice by dead-code sweeps
+# that did not check the prompt contract -- if you are about to remove it,
+# change QA_SYSTEM_PROMPT in ai_engine.py first.
+#
+# IMPORTANT: format_ai_message() escapes the model's output BEFORE calling the
+# renderers (XSS fix). That means by the time this function runs, ">=" is
+# "&gt;=" and "->" is "-&gt;". Both the raw and entity-escaped forms are
+# handled below; removing the entity forms silently breaks operator rendering.
+# -----------------------------------------------------------------
+
+_UNICODE_FRACTIONS = {
+    "1/2": "\u00bd", "1/3": "\u2153", "2/3": "\u2154", "1/4": "\u00bc",
+    "3/4": "\u00be", "1/5": "\u2155", "2/5": "\u2156", "3/5": "\u2157",
+    "4/5": "\u2158", "1/6": "\u2159", "5/6": "\u215a", "1/8": "\u215b",
+    "3/8": "\u215c", "5/8": "\u215d", "7/8": "\u215e",
+}
+
+# Greek names and constants are only converted when the surrounding line looks
+# like maths -- otherwise "the sigma of the group" becomes "the σ of the group".
+_MATH_CONTEXT = re.compile(
+    r'[=<>+\u00d7\u00f7\u2264\u2265\u2260\u2248\u221a\u00b1\u2192]'
+    r'|\^|_\d|\bsqrt\b|\d\s*[/*]\s*\d|&[lg]t;'
+)
+
+_PLAIN_GREEK = [
+    "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+    "iota", "kappa", "lambda", "mu", "nu", "xi", "rho", "sigma", "tau",
+    "upsilon", "phi", "chi", "psi", "omega", "pi",
+]
+
+# Only real HTML tags -- a tag name must start with a letter or "/". A loose
+# r'<[^>]+>' would swallow "x <= 3 then A -> B" as if it were a tag and skip
+# the maths inside it.
+_HTML_TAG = r'</?[A-Za-z][^<>]*>'
+_TAG_OR_ENTITY = re.compile(r'(' + _HTML_TAG + r'|&[#A-Za-z0-9]{1,8};)')
+_TAG_ONLY = re.compile(r'(' + _HTML_TAG + r')')
+
+
+def _apply_outside_tags(text, fn, protect_entities=True):
+    """
+    Run `fn` only on the plain-text spans of `text`, never inside an HTML tag
+    (so Pass 1's <span> output is not re-processed) and, by default, never
+    inside an HTML entity (so &#x27; is not mistaken for maths).
+    """
+    splitter = _TAG_OR_ENTITY if protect_entities else _TAG_ONLY
+    parts = splitter.split(text)
+    out = []
+    for part in parts:
+        if part.startswith("<") or (protect_entities and part.startswith("&") and part.endswith(";")):
+            out.append(part)
+        else:
+            out.append(fn(part))
+    return "".join(out)
+
+
+def _plain_entity_operators(s):
+    # Longest first: "&lt;-&gt;" must win over "&lt;-".
+    s = s.replace("&lt;-&gt;", "\u2194")
+    s = s.replace("-&gt;", "\u2192")
+    s = s.replace("=&gt;", "\u21d2")
+    s = s.replace("&lt;=", "\u2264")
+    s = s.replace("&gt;=", "\u2265")
+    s = s.replace("&lt;-", "\u2190")
+    return s
+
+
+def _plain_fractions(s):
+    def repl(m):
+        return _UNICODE_FRACTIONS.get(m.group(0), m.group(0))
+    return re.sub(r'(?<![\d/])\d/\d(?![\d/])', repl, s)
+
+
+def _plain_sqrt(s):
+    # Runs before the powers step so "sqrt(b^2-4ac)" still has a plain inner.
+    return re.sub(r'\bsqrt\s*\(([^()]{1,60})\)', lambda m: "\u221a(" + m.group(1) + ")", s)
+
+
+def _plain_powers(s):
+    def repl(m):
+        base, exponent = m.group(1), m.group(2)
+        converted = _to_sup(exponent)
+        if any(c not in SUPERSCRIPTS for c in exponent):
+            return m.group(0)
+        return base + converted
+    return re.sub(r'([A-Za-z0-9\)\]])\^(-?\d+|[A-Za-z])\b', repl, s)
+
+
+def _plain_subscripts(s):
+    def repl(m):
+        base, sub = m.group(1), m.group(2)
+        if any(c not in SUBSCRIPTS for c in sub):
+            return m.group(0)
+        return base + _to_sub(sub)
+    return re.sub(r'([A-Za-z\)\]])_(\d{1,3}|[a-z])\b', repl, s)
+
+
+def _plain_operators(s):
+    s = re.sub(r'<->', "\u2194", s)
+    s = re.sub(r'->', "\u2192", s)
+    s = re.sub(r'<-', "\u2190", s)
+    s = re.sub(r'=>', "\u21d2", s)
+    s = re.sub(r'>=', "\u2265", s)
+    s = re.sub(r'<=', "\u2264", s)
+    s = re.sub(r'!=', "\u2260", s)
+    s = re.sub(r'~=', "\u2248", s)
+    s = re.sub(r'\+/-', "\u00b1", s)
+    s = re.sub(r'(?<![\w+])\+-(?![\w-])', "\u00b1", s)
+    return s
+
+
+def _plain_degree(s):
+    return re.sub(r'(\d)\s*(?:deg|degrees|degree)\b', lambda m: m.group(1) + "\u00b0", s)
+
+
+def _plain_multiply(s):
+    return re.sub(r'(?<=\d)\s*x\s*(?=\d)', "\u00d7", s)
+
+
+def _plain_constants(s):
+    if not _MATH_CONTEXT.search(s):
+        return s
+    for name in _PLAIN_GREEK:
+        symbol = GREEK.get(name)
+        if not symbol:
+            continue
+        s = re.sub(r'\b' + name + r'\b', symbol, s)
+    s = re.sub(r'\b(?:infinity|inf)\b', "\u221e", s)
+    return s
+
+
+def render_plain_math_html(text):
+    """
+    Second rendering pass: converts the plain-text maths the LLM naturally
+    writes (no LaTeX delimiters) into Unicode, skipping anything already inside
+    an HTML tag or entity.
+    """
+    if not text:
+        return text
+
+    # Entity-encoded operators must be handled before entities are protected.
+    text = _apply_outside_tags(text, _plain_entity_operators, protect_entities=False)
+
+    for step in (_plain_fractions, _plain_sqrt, _plain_powers, _plain_subscripts,
+                 _plain_operators, _plain_degree, _plain_multiply, _plain_constants):
+        text = _apply_outside_tags(text, step)
+    return text
+
+
 def render_math_html(text):
     """
     Convert LaTeX delimiters to unicode wrapped in styled HTML spans.

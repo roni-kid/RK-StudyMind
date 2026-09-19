@@ -1,12 +1,23 @@
 import json
 import os
 import re
+import threading
 from datetime import datetime, timezone
 
-from modules.runtime_paths import data_dir
+from modules.runtime_paths import atomic_write_json, data_dir, log, read_json_with_recovery
 
 
 HISTORY_PATH = data_dir() / "study_history.json"
+
+# Every flashcard verdict is a full read-modify-write of this file. With two
+# browser sessions open, interleaved reads lost each other's updates; the lock
+# serialises the whole cycle within the process.
+_history_lock = threading.RLock()
+
+# quiz_sessions was already trimmed to 30, but topic_stats and flashcard_stats
+# grew without bound and the whole file is rewritten on every single click.
+MAX_TOPIC_STATS = 500
+MAX_FLASHCARD_STATS = 800
 
 
 def _default_history() -> dict:
@@ -22,30 +33,49 @@ def _normalize_key(text: str) -> str:
 
 
 def load_study_history() -> dict:
-    try:
-        if HISTORY_PATH.exists():
-            with open(HISTORY_PATH, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-                default = _default_history()
-                for key, value in default.items():
-                    data.setdefault(key, value)
-                return data
-    except Exception as exc:
-        print(f"⚠️ Could not load study history: {exc}")
+    data, error = read_json_with_recovery(HISTORY_PATH, default=None)
+    if error:
+        log(f"⚠️ Study history: {error}")
+    if isinstance(data, dict):
+        default = _default_history()
+        for key, value in default.items():
+            data.setdefault(key, value)
+        return data
     return _default_history()
+
+
+def _trim_history(history: dict) -> dict:
+    """Bound the two dicts that previously grew forever."""
+    topics = history.get("topic_stats", {})
+    if len(topics) > MAX_TOPIC_STATS:
+        ranked = sorted(
+            topics.items(),
+            key=lambda kv: int((kv[1] or {}).get("attempts", 0)),
+            reverse=True,
+        )
+        history["topic_stats"] = dict(ranked[:MAX_TOPIC_STATS])
+
+    cards = history.get("flashcard_stats", {})
+    if len(cards) > MAX_FLASHCARD_STATS:
+        ranked = sorted(
+            cards.items(),
+            key=lambda kv: int((kv[1] or {}).get("correct", 0)) + int((kv[1] or {}).get("wrong", 0)),
+            reverse=True,
+        )
+        history["flashcard_stats"] = dict(ranked[:MAX_FLASHCARD_STATS])
+    return history
 
 
 def save_study_history(history: dict) -> None:
     try:
-        HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(HISTORY_PATH, "w", encoding="utf-8") as handle:
-            json.dump(history, handle, indent=2)
+        atomic_write_json(HISTORY_PATH, _trim_history(history))
     except Exception as exc:
-        print(f"⚠️ Could not save study history: {exc}")
+        log(f"⚠️ Could not save study history: {exc}")
 
 
 def record_quiz_session(*, sources: list[str], difficulty: str, score: int, total: int,
                         attempts: list[dict]) -> dict:
+  with _history_lock:
     history = load_study_history()
     wrong_questions = []
     missed_topics = []
@@ -106,6 +136,7 @@ def get_quiz_analytics(limit_topics: int = 5, limit_sessions: int = 5) -> dict:
 
 
 def record_flashcard_result(question: str, source_label: str, remembered: bool) -> dict:
+  with _history_lock:
     history = load_study_history()
     key = _normalize_key(question)
     entry = history["flashcard_stats"].setdefault(key, {

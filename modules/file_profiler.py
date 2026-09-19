@@ -15,11 +15,16 @@ import math
 import logging
 from pathlib import Path
 
+from modules.runtime_paths import data_dir
+
 logger = logging.getLogger(__name__)
 
 # ── Config loader ─────────────────────────────────────────────────────────────
 
-_CONFIG_PATH = Path(__file__).parent.parent / "data" / "config.json"
+# Derived from runtime_paths, not __file__: under a PyInstaller build __file__
+# resolves inside the temp extraction bundle, so the app would read a config
+# that lives in a directory wiped on exit rather than the one next to the .exe.
+_CONFIG_PATH = data_dir() / "config.json"
 
 _CONFIG_DEFAULTS: dict = {
     "max_file_size_mb": 25,

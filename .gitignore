@@ -59,10 +59,18 @@ desktop.ini
 # Codex config
 .codex
 
-# Project-internal docs — not for public repo
-memory.md
-CHANGELOG.md
-CLAUDE.md
+# NOTE (2026-09-15 security remediation): memory.md, CHANGELOG.md, and
+# CLAUDE.md used to be excluded here. Git is the only sync mechanism across
+# RoniKid's multiple accounts/machines, so ignoring these meant one account
+# could log "fixed" in CHANGELOG.md while another account's copy never learned
+# the fix existed — that desync is the root cause the Sept 2026 security audit
+# (SM-01) traced three "documented as fixed" regressions back to. The repo is
+# private, so there's no public-facing confidentiality reason to exclude them.
+# They are now tracked. If you add a genuinely personal note that shouldn't
+# sync, put it in a new untracked file rather than re-adding these three.
+#
+# THEME_OVERHAUL.md is left ignored — it's a one-off planning scratchpad, not
+# a state-of-truth doc other sessions rely on for correctness.
 THEME_OVERHAUL.md
 
 # Local launcher — machine-specific

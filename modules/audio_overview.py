@@ -10,38 +10,46 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from modules.ai_engine import ask_lmstudio
+from modules.ai_engine import ask_lmstudio, is_lmstudio_error
+from modules.runtime_paths import app_root, exports_dir, log, voices_dir
 from modules.structured_generation import clean_text, extract_json_value, make_result
 
 
-ROOT_DIR = Path(__file__).resolve().parent.parent  # modules/ -> StudyMind/ root
-AUDIO_OUTPUT_DIR = ROOT_DIR / "exports" / "audio_overviews"
-PIPER_VOICE_DIR = ROOT_DIR / "voices"
+# Derived from runtime_paths, not __file__. Under a PyInstaller build __file__
+# resolves inside the temp extraction bundle, which is wiped on exit — every
+# generated audio overview and transcript would silently vanish.
+ROOT_DIR = app_root()
+AUDIO_OUTPUT_DIR = exports_dir() / "audio_overviews"
+PIPER_VOICE_DIR = voices_dir()
+
+# Per-turn WAV segments are an intermediate artifact. They were never deleted,
+# so each run left up to 42 WAVs on disk alongside the combined WAV and the MP3.
+KEEP_AUDIO_SEGMENTS = False
 
 DURATION_PRESETS = {
     "Short (~4 min)": {
-        "target_turns": 10,
-        "min_turns": 6,
-        "max_turns": 14,
-        "top_k": 5,
-        "max_context_words": 2600,
-        "max_tokens": 1200,
-    },
-    "Standard (~6 min)": {
         "target_turns": 16,
-        "min_turns": 8,
-        "max_turns": 22,
-        "top_k": 8,
-        "max_context_words": 4200,
+        "min_turns": 10,
+        "max_turns": 20,
+        "top_k": 6,
+        "max_context_words": 3000,
         "max_tokens": 1800,
     },
-    "Deep (~9 min)": {
+    "Standard (~6 min)": {
         "target_turns": 24,
-        "min_turns": 12,
-        "max_turns": 32,
-        "top_k": 12,
-        "max_context_words": 6500,
+        "min_turns": 14,
+        "max_turns": 30,
+        "top_k": 9,
+        "max_context_words": 4600,
         "max_tokens": 2600,
+    },
+    "Deep (~9 min)": {
+        "target_turns": 34,
+        "min_turns": 18,
+        "max_turns": 42,
+        "top_k": 13,
+        "max_context_words": 7000,
+        "max_tokens": 3600,
     },
 }
 
@@ -106,7 +114,7 @@ def generate_audio_overview_result(
     try:
         transcript_paths = save_transcript_files(script)
     except Exception as _exc:
-        print(f"[audio_overview] Could not save transcript files: {_exc}")
+        log(f"[audio_overview] Could not save transcript files: {_exc}")
         transcript_paths = {"json": "", "markdown": ""}
     audio_path = ""
     audio_note = ""
@@ -183,6 +191,7 @@ Rules:
 def generate_script(source_title: str, context: str, outline: dict, preset: dict) -> dict:
     target_turns = int(preset["target_turns"])
     max_turns = int(preset["max_turns"])
+    min_turns = int(preset.get("min_turns", 6))
     outline_json = json.dumps(outline, ensure_ascii=False, indent=2)
     prompt = f"""Write a two-host StudyMind audio overview script from the outline and document context.
 
@@ -206,7 +215,7 @@ Rules:
 - Alternate HOST_A and HOST_B.
 - HOST_A is the calm guide; HOST_B is curious and practical.
 - Ground every claim in the provided document context.
-- Short spoken turns only. No long monologues.
+- Each turn should be 2-4 full sentences — enough to actually explain or react to an idea, not a one-line soundbite. Avoid long monologues, but do not clip turns short either.
 - No markdown, no citations, no stage directions, no bracketed actions.
 - Keep math, physics, and chemistry notation readable in speech.
 - Source title: {source_title}
@@ -238,7 +247,7 @@ Convert it into ONLY valid JSON with this shape:
 {{"metadata": {{"title": "{source_title}", "estimated_minutes": 6}}, "turns": [{{"speaker": "HOST_A", "text": "..."}}, {{"speaker": "HOST_B", "text": "..."}}]}}
 
 Rules:
-- 6 to {max_turns} turns.
+- {min_turns} to {max_turns} turns.
 - Alternate HOST_A and HOST_B.
 - Remove markdown and stage directions.
 - Preserve only grounded source content.
@@ -430,10 +439,32 @@ def synthesize_script_audio(script: dict, voice_a: str = "", voice_b: str = "") 
         combined_wav = AUDIO_OUTPUT_DIR / f"{stem}_{stamp}.wav"
         assemble_wav_segments(wav_paths, combined_wav, pause_ms=280)
         final_path, converted = convert_wav_to_mp3(combined_wav)
+
+        # Segments have served their purpose once the combined file exists.
+        _cleanup_segment_dir(run_dir)
+        # If ffmpeg produced an MP3, the intermediate WAV is redundant too.
+        if converted and combined_wav.exists() and Path(final_path) != combined_wav:
+            try:
+                combined_wav.unlink()
+            except Exception as exc:
+                log(f"[audio_overview] Could not remove intermediate WAV: {exc}")
+
         note = "MP3 exported" if converted else "WAV exported; ffmpeg not found for MP3 conversion"
         return make_result(True, {"audio_path": str(final_path)}, status="clean", note=note)
     except Exception as exc:
+        _cleanup_segment_dir(run_dir)
         return make_result(False, status="failed", note=f"Audio synthesis failed: {exc}")
+
+
+def _cleanup_segment_dir(run_dir: Path) -> None:
+    """Remove the per-turn WAV scratch directory."""
+    if KEEP_AUDIO_SEGMENTS:
+        return
+    try:
+        if run_dir and Path(run_dir).exists():
+            shutil.rmtree(run_dir, ignore_errors=True)
+    except Exception as exc:
+        log(f"[audio_overview] Could not clean up segments in {run_dir}: {exc}")
 
 
 def resolve_piper_config(voice_a: str = "", voice_b: str = "") -> dict:
@@ -549,10 +580,46 @@ def _clean_list(value: Any, limit: int = 6) -> list[str]:
 
 
 def _clean_turn_text(value: Any) -> str:
-    text = clean_text(value, limit=420)
+    text = clean_text(value, limit=900)
+    # Strip any code blocks/inline code that leaked into narration — audio overviews
+    # narrate concepts, they never read source code symbol-by-symbol aloud.
+    text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+    text = re.sub(r'`[^`]{1,120}`', '', text)
     text = re.sub(r'\[[^\]]{1,60}\]', '', text)
     text = re.sub(r'\([^)]{1,40}\)', lambda m: '' if any(word in m.group(0).lower() for word in ["laugh", "sigh", "pause", "music"]) else m.group(0), text)
+    text = _verbalize_prose_symbols(text)
     text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+# Symbols with an unambiguous spoken equivalent in prose narration — verbalized so
+# Piper doesn't silently drop them or garble them. Ordinary punctuation (. , ... — ? ' -)
+# is left untouched since Piper already renders it correctly via prosody (pause/pitch),
+# not as spoken words.
+_PROSE_SYMBOL_MAP = {
+    "\u2205": " empty set ",   # ∅
+    "\u00a7": " section ",     # §
+}
+
+# Pure formatting artifacts with no spoken equivalent — silently dropped rather than
+# risking espeak-ng mispronouncing them.
+_PROSE_SYMBOL_STRIP = "\u00b6"  # ¶
+
+
+def _verbalize_prose_symbols(text: str) -> str:
+    """
+    Replace math/reference symbols with spoken words, and strip pure-formatting
+    marks, in narration text only. Does not touch normal punctuation (Piper
+    already handles . , ... — ? ' - correctly as prosody, not spoken words).
+    Standalone '#' (not part of a word, e.g. a stray section/heading marker) is
+    stripped; '#' inside a word or code token is left alone since code should
+    already be filtered out before this point.
+    """
+    for symbol, spoken in _PROSE_SYMBOL_MAP.items():
+        text = text.replace(symbol, spoken)
+    for symbol in _PROSE_SYMBOL_STRIP:
+        text = text.replace(symbol, " ")
+    text = re.sub(r'(?<!\S)#(?!\S)', ' ', text)
     return text
 
 
@@ -564,8 +631,8 @@ def _limit_words(text: str, max_words: int) -> str:
 
 
 def _is_lmstudio_error(raw: str) -> bool:
-    value = str(raw or "").strip()
-    return value.startswith(("❌", "⚠️", "⏱️"))
+    """Kept as a local alias; the canonical implementation is in ai_engine."""
+    return is_lmstudio_error(raw)
 
 
 def _other_speaker(speaker: str) -> str:
@@ -573,10 +640,10 @@ def _other_speaker(speaker: str) -> str:
 
 
 def _minutes_for_preset(preset: dict) -> int:
-    turns = int(preset.get("target_turns", 16))
-    if turns <= 10:
+    turns = int(preset.get("target_turns", 24))
+    if turns <= 16:
         return 4
-    if turns >= 24:
+    if turns >= 34:
         return 9
     return 6
 

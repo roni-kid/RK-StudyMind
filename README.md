@@ -143,24 +143,26 @@ Your browser will open automatically at `http://127.0.0.1:7860`
 ```
 StudyMind/
 ├── app.py                      # Main Gradio app — all 8 tabs, UI logic, render functions
-├── adaptive_chunking.py        # Model detection, 5-tier chunk sizing, session limit enforcement
-├── ai_engine.py                # LM Studio HTTP client, temperature control, merged-context prompting
-├── audio_overview.py           # Audio tab — staged two-host transcript generation + optional Piper TTS
-├── code_viewer.py              # VS Code-style Pygments syntax highlighting for code previews
-├── coding_agent.py             # Coding tab — Explain + Ask AI over Library-sourced code files
-├── doc_library.py              # Multi-document library — HTML cards, JSON persistence
-├── engine_manager.py           # LM Studio router — single-request status check
-├── exporters.py                # CSV and study report export helpers
-├── file_profiler.py            # Upload pre-scan — word count estimation, split/stretch logic
-├── flashcards.py               # Batched flashcard generation — deduplication, adaptive context, low-temp
-├── math_renderer.py            # Two-pass LaTeX-to-Unicode math rendering
-├── mindmap.py                  # Structured study tree renderer — concept clustering, adaptive context
-├── pdf_reader.py               # PDF, DOCX, TXT, MD, PPTX, EPUB, code file extraction + OCR
-├── quiz.py                     # MCQ generation — 3-strategy parser, adaptive context, low-temp calls
-├── structured_generation.py    # Shared JSON extraction, deduplication, result envelope
-├── study_context.py            # Balanced context builder — auto-detects adaptive max_words
-├── study_history.py            # Quiz session history and flashcard performance tracking
-├── vector_store.py             # ChromaDB — dual-mode embeddings, background indexing, thread-safe sessions
+├── modules/
+│   ├── adaptive_chunking.py    # Model detection, 5-tier chunk sizing, session limit enforcement
+│   ├── ai_engine.py            # LM Studio HTTP client, temperature control, merged-context prompting
+│   ├── audio_overview.py       # Audio tab — staged two-host transcript generation + optional Piper TTS
+│   ├── code_viewer.py          # VS Code-style Pygments syntax highlighting for code previews
+│   ├── coding_agent.py         # Coding tab — Explain + Ask AI over Library-sourced code files
+│   ├── doc_library.py          # Multi-document library — HTML cards, JSON persistence
+│   ├── engine_manager.py       # LM Studio router — single-request status check
+│   ├── exporters.py            # CSV and study report export helpers
+│   ├── file_profiler.py        # Upload pre-scan — word count estimation, split/stretch logic
+│   ├── flashcards.py           # Batched flashcard generation — deduplication, adaptive context, low-temp
+│   ├── math_renderer.py        # Two-pass LaTeX-to-Unicode math rendering
+│   ├── mindmap.py              # Structured study tree renderer — concept clustering, adaptive context
+│   ├── pdf_reader.py           # PDF, DOCX, TXT, MD, PPTX, EPUB, code file extraction + OCR
+│   ├── quiz.py                 # MCQ generation — 3-strategy parser, adaptive context, low-temp calls
+│   ├── runtime_paths.py        # Frozen-vs-dev path resolution, atomic JSON writes, data/exports/uploads dirs
+│   ├── structured_generation.py # Shared JSON extraction, deduplication, result envelope
+│   ├── study_context.py        # Balanced context builder — auto-detects adaptive max_words
+│   ├── study_history.py        # Quiz session history and flashcard performance tracking
+│   └── vector_store.py         # ChromaDB — dual-mode embeddings, background indexing, thread-safe sessions
 ├── _splash_patch.py            # Startup splash screen CSS + JS (injected at launch)
 ├── data/                       # ChromaDB vector store + library metadata (JSON) + config.json
 ├── exports/                    # Quiz reports, flashcard CSVs, mindmap HTMLs, audio transcripts
@@ -188,6 +190,7 @@ ebooklib==0.20
 beautifulsoup4==4.14.3
 pytesseract==0.3.13
 Pillow==11.3.0
+pygments==2.21.0
 ```
 
 Install all with:
