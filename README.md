@@ -167,10 +167,7 @@ StudyMind/
 ├── data/                       # ChromaDB vector store + library metadata (JSON) + config.json
 ├── exports/                    # Quiz reports, flashcard CSVs, mindmap HTMLs, audio transcripts
 ├── requirements.txt            # Pinned Python dependencies
-├── Studymind.bat               # One-click app launcher (Windows)
-├── push_to_github.bat          # One-click GitHub push script (Windows)
-├── memory.md                   # Permanent project design decisions and rules
-├── CHANGELOG.md                # Full session-by-session history of changes
+├── StudyMind.spec
 └── README.md
 ```
 
